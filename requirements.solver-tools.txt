@@ -7,3 +7,4 @@ z3-solver>=4.12,<5
 requests>=2.31,<3
 beautifulsoup4>=4.12,<5
 pillow>=10,<13
+numpy>=1.26,<3
