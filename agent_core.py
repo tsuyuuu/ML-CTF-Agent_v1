@@ -134,8 +134,17 @@ EFFICIENT INVESTIGATION:
   Diagnose the error and select a different approach.
 - For binaries, begin with targeted inspection using
   file, strings, readelf, and relevant function symbols.
-- Prefer examining specific functions or address ranges
-  rather than dumping an entire binary's disassembly.
+- For ELF binaries, first list symbols with nm or readelf.
+- If a relevant function has a symbol, use:
+  objdump -d -M intel --disassemble=FUNCTION BINARY
+- Prefer whole-function disassembly over arbitrary address ranges.
+- Do not start disassembly at an address in the middle of
+  an instruction.
+- For XOR transformations, identify the key, determine which
+  buffer is transformed, extract embedded constants, and use
+  Python to reconstruct the expected input.
+- Test reconstructed inputs against the challenge binary
+  before submitting candidate flags.
 - Use output limits such as head, tail, sed, and grep
   to prevent unnecessarily large tool responses.
 - When analyzing assembly, identify the program's
