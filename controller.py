@@ -3,8 +3,13 @@ import base64
 import shlex
 from pathlib import PurePosixPath
 
-from ctf_tools import inspect_binary, disassemble_binary
+from ctf_tools import (
+    inspect_binary,
+    disassemble_binary,
+    extract_stack_constants,
+)
 from ctf_specialist_tools import SPECIALIST_TOOL_NAMES, execute_specialist_tool
+
 
 # Switches between tools, choosing which ones should be called as necessary. 
 class ToolDispatcher:
@@ -96,6 +101,28 @@ class ToolDispatcher:
                     path,
                     args["start_address"],
                     args["stop_address"],
+                )
+            
+            elif name == "extract_stack_constants":
+                path = self._safe_path(args["path"])
+
+                quoted = shlex.quote(path)
+                check = self.solver.run_command(
+                    f"test -f {quoted} && "
+                    f"test ! -L {quoted} && "
+                    f"test $(wc -c < {quoted}) -le 10485760",
+                    timeout_s=timeout_s,
+                )
+
+                if check.get("exit_code") != 0:
+                    return {
+                        "error": "File missing, symbolic link, or exceeds 10 MiB"
+                    }
+
+                return extract_stack_constants(
+                    self.solver,
+                    path,
+                    args.get("function_name", "main"),
                 )
             elif name == "run_command":
                 command = args["command"]

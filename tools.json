@@ -147,6 +147,29 @@
       }
     }
   },
+
+  {
+    "type": "function",
+    "function": {
+      "name": "extract_stack_constants",
+      "description": "Extract immediate-byte assignments to rbp-relative stack locations from a named ELF function. Returns contiguous byte blocks sorted by memory location, along with duplicate offsets. Useful for reversing obfuscated strings without manually transcribing assembly. Does not decrypt the bytes.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "Absolute ELF binary path under /challenge or /work."
+          },
+          "function_name": {
+            "type": "string",
+            "description": "Function symbol name, such as main. Defaults to main."
+          }
+        },
+        "required": ["path"]
+      }
+    }
+  },
+
   {
     "type": "function",
     "function": {
