@@ -11,6 +11,13 @@ from pathlib import Path
 
 import random
 _CTF_CMD_TIMEOUT = int(os.environ.get("CTF_CMD_TIMEOUT", "180"))
+# Compaction triggers. The old 45000-char (~11k token) limit forced a compaction
+# every few steps on disassembly/exploit-heavy challenges, wiping the evidence
+# before the model could reason about it (the amnesia failure mode). gpt-oss:120b
+# has a ~128k-token window, so hold far more before compacting. Env-tunable: lower
+# CTF_COMPACT_CHARS if the hosted model starts returning context-overflow errors.
+_CTF_COMPACT_CHARS = int(os.environ.get("CTF_COMPACT_CHARS", "120000"))
+_CTF_COMPACT_MSGS = int(os.environ.get("CTF_COMPACT_MSGS", "60"))
 
 
 OLLAMA_URL = "https://ollama.com/api/chat"
@@ -106,7 +113,7 @@ def _canonical_signature(name, args):
 
 
 
-def compact_messages(messages, max_evidence_chars=16000):
+def compact_messages(messages, max_evidence_chars=48000):
     """
     Compact an agent conversation while preserving early
     discoveries and recent tool observations.
@@ -137,7 +144,7 @@ def compact_messages(messages, max_evidence_chars=16000):
 
         evidence.append(
             f"Tool: {name}\n"
-            f"Observation: {content[:1200]}"
+            f"Observation: {content[:2800]}"
         )
 
     if not evidence:
@@ -158,7 +165,7 @@ def compact_messages(messages, max_evidence_chars=16000):
     # Preserve both initial investigation and recent progress.
     selected_indices = sorted(set(
         list(range(min(3, len(evidence))))
-        + list(range(max(0, len(evidence) - 10), len(evidence)))
+        + list(range(max(0, len(evidence) - 16), len(evidence)))
     ))
 
     selected = []
@@ -403,6 +410,20 @@ NETWORK SERVICE / BINARY EXPLOITATION (pwn) GUIDANCE:
 - Develop and test iteratively against the remote; each attempt is a
   run_command or run_python call. When you recover the flag, submit it with
   submit_flag.
+- FIND THE OFFSET deterministically: send cyclic(200), catch the crash, and use
+  cyclic_find() on the faulting value; or read the C source for the buffer size.
+  Do not guess the overflow offset by trial and error.
+- GADGETS: if `pop rdi; ret` is not in the main binary, take it from libc via
+  ROP(libc)/ROPgadget, or use one_gadget. pwntools can auto-build the chain:
+  rop.call(system,[binsh]) or rop.system(binsh); then flat(offset_padding, rop).
+- CLOSE IT OUT -- this is where runs are lost: after sending the payload,
+  interact. Send b"cat flag.txt; cat /flag; cat flag 2>/dev/null; id\n", recv
+  the reply, search it for the flag format, and call submit_flag IMMEDIATELY. A
+  shell you never read the flag from is a wasted solve. Set a recv timeout so a
+  dead connection doesn't hang.
+- Keep ONE exploit in /work/exploit.py and edit it between attempts. Do not
+  rewrite the whole script from scratch each step, and reuse leak/base/offset
+  values you already computed (see WORKING NOTES) instead of re-deriving them.
 
 REVERSING GUIDANCE:
 - Start with: file, checksec, strings, readelf/objdump. Then disassemble the
@@ -415,6 +436,13 @@ REVERSING GUIDANCE:
   "failure" branch, and solve for stdin.
 - If the binary just compares against embedded bytes, extract and transform
   them directly (as in extract_stack_constants).
+- INVERT THE TRANSFORM: if the stored/expected bytes you extract are not
+  printable ASCII, the check transforms your input before comparing (commonly
+  input[i]^key, input[i]^i, input[i]+k, or a bit rotate). Read the handful of
+  instructions right before the comparison loop to identify the operation and
+  key, then apply the INVERSE to the stored bytes to recover the real input.
+  Submit THAT -- never the raw stored bytes, and never a readable taunt string
+  from the fail-message array (those are decoys).
 - Non-ELF targets: for Mach-O (macOS/iOS, incl. universal armv7/arm64) GNU
   `objdump -Mintel` often yields nothing; use `llvm-objdump -d --macho` or
   `llvm-nm`. Match the tool to the binary format (check `file` first) before
@@ -755,7 +783,7 @@ REVERSE ENGINEERING TOOL GUIDANCE:
             for m in messages
         )
 
-        if len(messages) >= 30 or context_chars > 45000:
+        if len(messages) >= _CTF_COMPACT_MSGS or context_chars > _CTF_COMPACT_CHARS:
             old_count = len(messages)
             old_chars = context_chars
 
@@ -1031,6 +1059,11 @@ REVERSE ENGINEERING TOOL GUIDANCE:
             name = function.get("name", "")
             args = function.get("arguments", {})
 
+            # Tolerate common model slips so they don't burn a whole step:
+            # namespaced tool names ("functions/run_command" -> "run_command").
+            if isinstance(name, str) and "/" in name:
+                name = name.rsplit("/", 1)[-1]
+
             action_start = time.monotonic()
             scope_violation = False
 
@@ -1113,7 +1146,15 @@ REVERSE ENGINEERING TOOL GUIDANCE:
                     raise ValueError(
                         "Tool arguments must be an object"
                     )
-                
+
+                # 'cmd' is a frequent misname for run_command's 'command'.
+                if (
+                    name == "run_command"
+                    and "command" not in args
+                    and "cmd" in args
+                ):
+                    args["command"] = args.pop("cmd")
+
                 if name not in tool_definitions:
                     raise ValueError(
                         f"Unknown tool '{name}'. "
