@@ -92,7 +92,11 @@ def preflight(challenge_id):
             f"{challenge_id}: requires a non-string benchmark checker"
         )
 
-    if not challenge.files:
+    is_service = service_compose_present(challenge_dir)
+
+    # Service challenges legitimately ship no downloadable files (everything
+    # lives in the target image); only non-service challenges require files.
+    if not challenge.files and not is_service:
         raise ValueError(
             f"{challenge_id}: no contestant files; review setup manually"
         )
@@ -104,7 +108,7 @@ def preflight(challenge_id):
         if not source.is_file():
             raise FileNotFoundError(source)
 
-    if service_compose_present(challenge_dir) and not services_enabled():
+    if is_service and not services_enabled():
         raise ValueError(
             f"{challenge_id}: service challenge needs a running target. "
             "Set CTF_ENABLE_SERVICES=1 to launch it via the trusted "

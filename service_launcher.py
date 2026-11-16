@@ -148,6 +148,25 @@ class ServiceLauncher:
                         port = int(ex)
                         break
 
+        # Regex fallback (PyYAML unavailable, or an unusual structure):
+        # recover aliases and the container port straight from the text.
+        if compose is not None:
+            if not aliases:
+                m = re.search(
+                    r"aliases:\s*\n((?:[ \t]*-[ \t]*\S+[ \t]*\n?)+)", text
+                )
+                if m:
+                    aliases = re.findall(r"-\s*(\S+)", m.group(1))
+            if port is None:
+                pm = re.search(
+                    r"ports:\s*\n((?:[ \t]*-[ \t]*[^\n]+\n?)+)", text
+                )
+                if pm:
+                    nums = re.findall(r"(\d+)", pm.group(1))
+                    if nums:
+                        # container port is the last number in "H:C" or "C"
+                        port = int(nums[-1])
+
         # Fallbacks when compose omits the port.
         if port is None:
             port = self._port_from_dockerfile()
