@@ -73,12 +73,15 @@ def _canonical_signature(name, args):
 
 
 
-def compact_messages(messages, max_evidence_chars=12000):
+def compact_messages(messages, max_evidence_chars=16000):
     """
     Compact an agent conversation while preserving early
     discoveries and recent tool observations.
 
-    Full history remains in the JSONL trace.
+    The challenge message (messages[1]) is always preserved verbatim; the
+    agent's persistent WORKING NOTES live there (see run_agent), so distilled
+    findings survive every compaction cycle. Full history remains in the JSONL
+    trace.
     """
     if len(messages) < 3:
         return messages
@@ -122,7 +125,7 @@ def compact_messages(messages, max_evidence_chars=12000):
     # Preserve both initial investigation and recent progress.
     selected_indices = sorted(set(
         list(range(min(3, len(evidence))))
-        + list(range(max(0, len(evidence) - 7), len(evidence)))
+        + list(range(max(0, len(evidence) - 10), len(evidence)))
     ))
 
     selected = []
@@ -314,6 +317,12 @@ EFFICIENT INVESTIGATION:
   use an installed equivalent instead of repeating it.
 - Reserve enough steps to validate a candidate and
   submit it through submit_flag when available.
+- Persist any result you will reuse (parsed grids, decoded values,
+  extracted bytes) to a file in /work, and read it back instead of
+  recomputing. /work survives even if the conversation is compacted.
+- Once you have the data needed to compute the answer, stop inspecting
+  and perform the final computation, then submit with submit_flag. Do not
+  repeatedly re-load or re-parse inputs you have already obtained.
 
 SERIALIZED MODEL / .pt / .pth FILE GUIDANCE:
 - A PyTorch .pt/.pth file is a ZIP. Tensor data lives in archive/data/<N> as
@@ -517,6 +526,45 @@ REVERSE ENGINEERING TOOL GUIDANCE:
                 )
                 break
 
+    # Persistent WORKING NOTES ledger. messages[1] (the challenge message) is
+    # always preserved across compaction, so a bounded rolling summary of recent
+    # tool results placed there survives every compaction cycle. This is what
+    # stops the agent from re-deriving results it already has (e.g. re-loading a
+    # parsed grid) every time the context is compacted.
+    challenge_base_content = messages[1]["content"]
+    working_notes = []
+
+    def _note_result(result):
+        if not isinstance(result, dict):
+            return str(result)[:220]
+        if result.get("skipped"):
+            return "skipped (redundant)"
+        if result.get("error"):
+            return "error: " + str(result.get("error"))[:180]
+        if result.get("verified"):
+            return "verified=True"
+        for key in ("stdout", "content", "disassembly"):
+            val = result.get(key)
+            if isinstance(val, str) and val.strip():
+                return (key + ": " + val.strip().replace("\n", " "))[:220]
+        if "blocks" in result:
+            return ("blocks: " + json.dumps(result.get("blocks"), default=str))[:220]
+        return json.dumps(
+            {k: result[k] for k in list(result)[:4]}, default=str
+        )[:220]
+
+    def _refresh_working_notes():
+        if not working_notes:
+            return
+        messages[1]["content"] = (
+            challenge_base_content
+            + "\n\nWORKING NOTES (your most recent tool results, newest last). "
+            "Build on these; do not repeat work already done. Persist data you "
+            "will reuse (parsed grids, decoded values) to a file in /work, which "
+            "survives compaction, and continue from where you left off:\n"
+            + "\n".join(working_notes[-20:])
+        )
+
     # autonomous agent loop
     while tool_calls < max_steps:
 
@@ -527,7 +575,7 @@ REVERSE ENGINEERING TOOL GUIDANCE:
             for m in messages
         )
 
-        if len(messages) >= 20 or context_chars > 20000:
+        if len(messages) >= 30 or context_chars > 45000:
             old_count = len(messages)
             old_chars = context_chars
 
@@ -952,6 +1000,13 @@ REVERSE ENGINEERING TOOL GUIDANCE:
                     "consecutive_recon": consecutive_recon,
                     "triage_constants": triage_constants,
                 })
+
+            # Append to the persistent ledger so this result survives any later
+            # compaction (kept in the always-preserved challenge message).
+            working_notes.append(
+                f"[{tool_calls}] {name}: {_note_result(result)}"
+            )
+            _refresh_working_notes()
             # ---------------------------------------------------------------
 
 

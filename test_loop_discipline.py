@@ -80,6 +80,12 @@ class ScriptedModel:
 
     def post(self, url, headers=None, json=None, timeout=None):
         self.calls += 1
+        # Capture the challenge message (messages[1]) sent on this call, so
+        # tests can confirm the persistent WORKING NOTES reach the model.
+        try:
+            self.last_challenge_content = json["messages"][1]["content"]
+        except (TypeError, KeyError, IndexError):
+            pass
         if self.queue:
             msg = self.queue.popleft()
         else:  # safety: end cleanly if the script runs dry
@@ -125,6 +131,7 @@ class LoopDisciplineTest(unittest.TestCase):
     def _run(self, script, *, challenge_id="test-misc", max_steps=15,
              max_seconds=120, correct_flag="FLAG{correct}"):
         model = ScriptedModel(script)
+        self._model = model
         disp = RecordingDispatcher(correct_flag=correct_flag)
 
         class _Shim:
@@ -230,6 +237,35 @@ class LoopDisciplineTest(unittest.TestCase):
         self.assertEqual(self._types(events)["tool_skipped"], 0)
 
     # ---- Test 6: env overrides are honoured --------------------------------
+    # ---- Test 7: compaction preserves the challenge message verbatim ------
+    def test_compaction_preserves_challenge_message(self):
+        challenge = {"role": "user",
+                     "content": "CHALLENGE\n\nWORKING NOTES:\n[3] run_python: grid 42x42 saved"}
+        msgs = [{"role": "system", "content": "sys"}, challenge]
+        for i in range(12):
+            msgs.append({"role": "assistant", "content": "", "tool_calls": [1]})
+            msgs.append({"role": "tool", "tool_name": "run_command",
+                         "content": f"obs {i}"})
+        out = agent_core.compact_messages(msgs)
+        # system + challenge preserved verbatim; challenge keeps WORKING NOTES
+        self.assertIs(out[1], challenge)
+        self.assertIn("WORKING NOTES", out[1]["content"])
+        self.assertLess(len(out), len(msgs))
+
+    # ---- Test 8: working notes reach the model and survive compaction -----
+    def test_working_notes_persist_to_model(self):
+        # Enough distinct steps to trigger at least one compaction.
+        script = [assistant(tool_call("run_command", command=f"echo step{i}"))
+                  for i in range(34)]
+        script.append(assistant(tool_call("finish", reason="done")))
+        summary, disp, events = self._run(script, max_steps=40)
+        self.assertGreaterEqual(self._types(events)["context_compaction"], 1)
+        # The last challenge message the model saw must carry WORKING NOTES
+        # with a recent result — proving progress survived compaction.
+        content = getattr(self._model, "last_challenge_content", "")
+        self.assertIn("WORKING NOTES", content)
+        self.assertIn("run_command", content)
+
     def test_repeat_limit_env_override(self):
         os.environ["CTF_REPEAT_LIMIT"] = "1"  # block on the 2nd identical call
         script = [assistant(tool_call("inspect_binary", path="/challenge/bin"))
