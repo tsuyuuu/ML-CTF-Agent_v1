@@ -32,6 +32,14 @@ RUN python3 -m venv /opt/ctf-tools-venv \
        -r /opt/ctf-tools/requirements.solver-tools.txt \
     && chmod -R a+rX /opt/ctf-tools-venv
 
+# PyTorch (CPU-only) for ML-themed challenges that ship serialized .pt models.
+# The solver runs with --network none, so nothing can be pip-installed at
+# attempt time; it must be baked in here. The CPU wheel avoids the large CUDA
+# payload. numpy comes from the requirements file above (also a torch dep).
+RUN /opt/ctf-tools-venv/bin/python -m pip install --no-cache-dir \
+        --index-url https://download.pytorch.org/whl/cpu torch \
+    && chmod -R a+rX /opt/ctf-tools-venv
+
 ENV PATH="/opt/ctf-tools-venv/bin:${PATH}"
 COPY ctf_tool_audit.py /opt/ctf-tools/ctf_tool_audit.py
 COPY test_ctf_tooling.py /opt/ctf-tools/test_ctf_tooling.py
@@ -40,13 +48,3 @@ RUN chmod 0644 /opt/ctf-tools/*.py /opt/ctf-tools/*.txt
 # Match the existing course sandbox's non-root UID/GID; never leave the
 # solver running as root after installing packages.
 USER 10001:10001
-
-# Offline QR and barcode decoding for forensic challenges
-USER root
-
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends \
-        zbar-tools \
-    && rm -rf /var/lib/apt/lists/*
-
-USER ctfuser

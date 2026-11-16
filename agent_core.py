@@ -314,6 +314,21 @@ EFFICIENT INVESTIGATION:
   use an installed equivalent instead of repeating it.
 - Reserve enough steps to validate a candidate and
   submit it through submit_flag when available.
+
+SERIALIZED MODEL / .pt / .pth FILE GUIDANCE:
+- A PyTorch .pt/.pth file is a ZIP. Tensor data lives in archive/data/<N> as
+  raw little-endian float32; archive/data.pkl holds the shapes and any
+  embedded strings. A storage of N*N floats is almost always an NxN matrix.
+- You do NOT need to unpickle the object graph. Prefer reading the raw
+  storage directly: struct.unpack('<%df' % count, bytes) or
+  numpy.frombuffer(bytes, '<f4'), then reshape to the dimensions in data.pkl.
+- If you choose torch.load instead, use
+  torch.load(path, map_location='cpu', weights_only=False) and first define
+  any missing custom class as a torch.nn.Module stub, e.g.
+  `import __main__, torch; class Maze(torch.nn.Module): pass; __main__.Maze=Maze`.
+- numpy and a CPU build of torch are installed in the tool image. If an import
+  still fails, do NOT retry it or attempt pip install (the solver has no
+  network); parse the raw storage with struct instead.
 """
 
     messages = [
