@@ -7,6 +7,8 @@ import requests
 from datetime import datetime, timezone
 from pathlib import Path
 
+import random
+
 
 OLLAMA_URL = "https://ollama.com/api/chat"
 LOG_DIR = Path(__file__).resolve().parent / "logs"
@@ -186,7 +188,7 @@ EFFICIENT INVESTIGATION:
         # request model action with retries
         data = None
 
-        for retry in range(3):
+        for retry in range(5):
 
             remaining = max_seconds - (time.monotonic() - start)
 
@@ -251,7 +253,7 @@ EFFICIENT INVESTIGATION:
                     )
                 )
 
-                if not retryable or retry == 2:
+                if not retryable or retry == 4:
                     status = "model_error"
                     break
 
@@ -263,7 +265,11 @@ EFFICIENT INVESTIGATION:
                     status = "timeout"
                     break
 
-                delay = min(2 ** retry, remaining)
+                delay = min(
+                    2 ** retry + random.uniform(0, 1),
+                    15,
+                    max(0, remaining - 1),
+                )
 
                 if delay > 0:
                     time.sleep(delay)
