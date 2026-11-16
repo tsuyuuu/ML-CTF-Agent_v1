@@ -95,6 +95,24 @@ def prepare_contestant_files(challenge, workspace):
 
         exported.append(filename)
 
+    # The solver runs as an unprivileged uid (10001) that differs from the
+    # staging user, and reaches these files only through the read-only
+    # /challenge mount, i.e. via the "other" permission bits. A contestant
+    # file nested in a subdirectory (e.g. attachment/maze.pt) is unreachable
+    # unless every parent directory is traversable (o+x). Normalize the whole
+    # staged tree: directories -> 0o755 (read + traverse), files -> 0o644
+    # (read only). The read-only mount still prevents any writes.
+    for root, dirs, filenames in os.walk(workspace):
+        try:
+            os.chmod(root, 0o755)
+        except OSError:
+            pass
+        for fname in filenames:
+            try:
+                os.chmod(os.path.join(root, fname), 0o644)
+            except OSError:
+                pass
+
     return exported
 
 def main():
