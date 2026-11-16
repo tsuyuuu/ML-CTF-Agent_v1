@@ -100,49 +100,124 @@
     }
   },
   {
-  "type": "function",
-  "function": {
-    "name": "inspect_binary",
-    "description": "Inspect a contestant binary inside the isolated solver. Returns bounded file type, ELF header, and relevant strings. Use this before manually dumping large amounts of disassembly.",
-    "parameters": {
-      "type": "object",
-      "properties": {
-        "path": {
-          "type": "string",
-          "description": "Absolute path to a contestant file under /challenge or /work."
-        }
-      },
-      "required": ["path"]
+    "type": "function",
+    "function": {
+      "name": "inspect_binary",
+      "description": "Inspect a contestant binary inside the isolated solver. Returns bounded file type, ELF header, and relevant strings. Use this before manually dumping large amounts of disassembly.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "Absolute path to a contestant file under /challenge or /work."
+          }
+        },
+        "required": [
+          "path"
+        ]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "disassemble_binary",
+      "description": "Disassemble a bounded address range of a contestant binary. Use this for targeted reverse engineering instead of dumping an entire executable. Specify hexadecimal start and stop addresses, with a maximum range of 512 bytes.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "Absolute path under /challenge or /work."
+          },
+          "start_address": {
+            "type": "string",
+            "description": "Starting virtual address, e.g. 0x400f10."
+          },
+          "stop_address": {
+            "type": "string",
+            "description": "Ending virtual address, e.g. 0x401010."
+          }
+        },
+        "required": [
+          "path",
+          "start_address",
+          "stop_address"
+        ]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "list_files",
+      "description": "List up to 80 regular files, to depth 3, in /challenge (read-only contestant files) or /work (scratch scripts). Use early when file inventory is unclear.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "root": {
+            "type": "string",
+            "enum": [
+              "/challenge",
+              "/work"
+            ],
+            "description": "Directory to enumerate; defaults to /challenge"
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "run_python",
+      "description": "Run a short Python script in the isolated solver, not the controller. Crypto, sympy, z3, pwntools and other installed libraries can be imported. Maximum 2700 UTF-8 bytes; for longer scripts use write_file + run_command. Returns stdout, stderr, exit code, timeout and truncation status.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "code": {
+            "type": "string",
+            "maxLength": 2700,
+            "description": "Python source code; print findings for the next step"
+          }
+        },
+        "required": [
+          "code"
+        ],
+        "additionalProperties": false
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "analyze_artifact",
+      "description": "Read-only analysis of a contestant artifact in /challenge or /work. Modes: overview (type, SHA256, metadata), hex (first 512 bytes), strings (bounded printable strings), archive (bounded 7z listing). Rejects symlinks and files >200 MiB. Never extracts untrusted archives.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "Absolute artifact path"
+          },
+          "mode": {
+            "type": "string",
+            "enum": [
+              "overview",
+              "hex",
+              "strings",
+              "archive"
+            ],
+            "description": "Inspection mode; defaults to overview"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "additionalProperties": false
+      }
     }
   }
-},
-{
-  "type": "function",
-  "function": {
-    "name": "disassemble_binary",
-    "description": "Disassemble a bounded address range of a contestant binary. Use this for targeted reverse engineering instead of dumping an entire executable. Specify hexadecimal start and stop addresses, with a maximum range of 512 bytes.",
-    "parameters": {
-      "type": "object",
-      "properties": {
-        "path": {
-          "type": "string",
-          "description": "Absolute path under /challenge or /work."
-        },
-        "start_address": {
-          "type": "string",
-          "description": "Starting virtual address, e.g. 0x400f10."
-        },
-        "stop_address": {
-          "type": "string",
-          "description": "Ending virtual address, e.g. 0x401010."
-        }
-      },
-      "required": [
-        "path",
-        "start_address",
-        "stop_address"
-      ]
-    }
-  }
-}
 ]

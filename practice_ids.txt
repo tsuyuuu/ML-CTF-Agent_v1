@@ -1,0 +1,10 @@
+rev-checker
+rev-whataxor
+cry-hybrid2
+cry-babycrypto
+pwn-puffin
+pwn-target-practice
+msc-showdown
+msc-ezmaze
+web-poem-collection
+for-1black0white

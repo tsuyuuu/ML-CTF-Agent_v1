@@ -14,6 +14,7 @@ from nyuctf.challenge import CTFChallenge
 from agent_core import run_agent
 from solver_runtime import DockerSolver
 from controller import ToolDispatcher
+from ctf_runtime_config import limits_from_env
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -116,6 +117,7 @@ def main():
     challenge = load_challenge(args.challenge_id)
 
     tools = json.loads(TOOLS_FILE.read_text())
+    dev_steps, dev_seconds = limits_from_env()
 
     # Exclude flag verification until approved
     # private evaluator is integrated.
@@ -167,8 +169,8 @@ def main():
                 execute_tool=dispatcher,
                 api_key=api_key,
                 tools=tools,
-                max_steps=15,
-                max_seconds=300
+                max_steps=dev_steps,
+                max_seconds=dev_seconds
             )
 
             print("\n=== RUN SUMMARY ===")

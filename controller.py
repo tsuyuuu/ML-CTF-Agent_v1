@@ -4,6 +4,7 @@ import shlex
 from pathlib import PurePosixPath
 
 from ctf_tools import inspect_binary, disassemble_binary
+from ctf_specialist_tools import SPECIALIST_TOOL_NAMES, execute_specialist_tool
 
 # Switches between tools, choosing which ones should be called as necessary. 
 class ToolDispatcher:
@@ -45,6 +46,11 @@ class ToolDispatcher:
     # The changing by name portions were handwriten, but the checks and other variables were generated
     def __call__(self, name, args, timeout_s=10):
         try:
+            if name in SPECIALIST_TOOL_NAMES:
+                return execute_specialist_tool(
+                    name, args, self.solver, self._safe_path,
+                    timeout_s=timeout_s,
+                )
             if name == "inspect_binary":
                 path = self._safe_path(args["path"])
 

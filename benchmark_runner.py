@@ -13,6 +13,7 @@ from challenge_runner import load_challenge, prepare_contestant_files
 from controller import ToolDispatcher
 from flag_verifier import FlagVerifier
 from solver_runtime import DockerSolver
+from ctf_runtime_config import limits_from_env
 
 BASE = Path(__file__).resolve().parent
 IDS_FILE = BASE / "evaluation_ids.txt"
@@ -20,8 +21,7 @@ PILOT_RESULTS = BASE / "results" / "development" / "ctftiny_pilot_results.jsonl"
 EVAL_RESULTS = BASE / "results" / "evaluation" / "results.jsonl"
 
 MODEL = "gpt-oss:120b"
-MAX_STEPS = 15
-MAX_SECONDS = 300
+MAX_STEPS, MAX_SECONDS = limits_from_env()
 
 
 def selected_ids():

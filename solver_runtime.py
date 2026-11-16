@@ -14,14 +14,25 @@ The DockerSolver class is responsible for:
 This separates the agent's command execution environment from the
 trusted controller, which manages challenge metadata and evaluation.
 """
+import os
+import re
 import subprocess
 import uuid
 from pathlib import Path
 
 class DockerSolver:
      # Manage the lifecycle and command execution of a restricted Docker container.
-    def __init__(self, image="ctf-solver:dev"):
-        self.image = image
+    def __init__(self, image=None):
+        # Trusted-controller configuration; never accepted from agent tools.
+        selected = image if image is not None else os.environ.get(
+            "CTF_SOLVER_IMAGE", "ctf-solver:dev"
+        )
+        # Fail closed for malformed refs instead of passing them to Docker.
+        if not isinstance(selected, str) or not re.fullmatch(
+            r"[A-Za-z0-9][A-Za-z0-9._/:@-]{0,199}", selected
+        ):
+            raise ValueError("Invalid CTF solver image reference")
+        self.image = selected
         self.container_id = None
 
     def start(self, challenge_dir=None):

@@ -6,6 +6,7 @@ from pathlib import Path
 from agent_core import run_agent
 from solver_runtime import DockerSolver
 from controller import ToolDispatcher
+from ctf_runtime_config import limits_from_env
 
 # Load Ollama API key securely into environment
 api_key = os.environ.get("OLLAMA_API_KEY")
@@ -24,13 +25,20 @@ enabled = {
     "run_command",
     "read_file",
     "write_file",
-    "finish"
+    "finish",
+    "list_files",
+    "run_python",
+    "analyze_artifact",
+    "inspect_binary",
+    "disassemble_binary"
 }
 
 tools = [
     t for t in all_tools
     if t["function"]["name"] in enabled
 ]
+
+dev_steps, dev_seconds = limits_from_env()
 
 # Starts fresh isolated solver
 solver = DockerSolver()
@@ -58,8 +66,8 @@ try:
         execute_tool=dispatcher,
         api_key=api_key,
         tools=tools,
-        max_steps=15,
-        max_seconds=300
+        max_steps=dev_steps,
+        max_seconds=dev_seconds
     )
 
     print("\n=== RUN SUMMARY ===")
