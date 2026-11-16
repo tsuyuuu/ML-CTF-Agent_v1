@@ -119,6 +119,113 @@ def _history_to_anthropic(messages):
     return system_text, out
 
 
+def _ollama_tools_to_openai(tools):
+    """Ensure tools are in OpenAI's [{type:function, function:{...}}] shape."""
+    out = []
+    for t in tools:
+        if t.get("type") == "function" and "function" in t:
+            out.append(t)
+        else:
+            fn = t.get("function", t)
+            out.append({
+                "type": "function",
+                "function": {
+                    "name": fn.get("name"),
+                    "description": fn.get("description", ""),
+                    "parameters": fn.get("parameters", {"type": "object", "properties": {}}),
+                },
+            })
+    return out
+
+
+def _history_to_openai(messages):
+    """Translate the Ollama-shaped canonical history into OpenAI chat messages.
+    Handles tool_call_id pairing and keeps each assistant tool-call turn
+    immediately followed by its tool responses (OpenAI requirement)."""
+    out = []
+    pending_tool = []   # tool-role messages awaiting flush (must follow assistant)
+    pending_user = []   # user text awaiting flush
+    tool_id_queue = []
+    counter = [0]
+
+    def flush():
+        out.extend(pending_tool)
+        if pending_user:
+            out.append({"role": "user", "content": "\n\n".join(pending_user)})
+        pending_tool.clear()
+        pending_user.clear()
+
+    for m in messages:
+        role = m.get("role")
+        if role == "system":
+            out.append({"role": "system", "content": m.get("content", "")})
+        elif role == "assistant":
+            flush()
+            msg = {"role": "assistant"}
+            txt = m.get("content")
+            oai_tcs = []
+            for tc in (m.get("tool_calls") or []):
+                fn = tc.get("function", {})
+                args = fn.get("arguments", {})
+                if isinstance(args, dict):
+                    args = json.dumps(args)
+                elif not isinstance(args, str):
+                    args = json.dumps({})
+                tid = "call_%d" % counter[0]
+                counter[0] += 1
+                tool_id_queue.append(tid)
+                oai_tcs.append({
+                    "id": tid, "type": "function",
+                    "function": {"name": fn.get("name", ""), "arguments": args},
+                })
+            msg["content"] = txt if (isinstance(txt, str) and txt.strip()) else None
+            if oai_tcs:
+                msg["tool_calls"] = oai_tcs
+            if msg["content"] is None and not oai_tcs:
+                msg["content"] = "(no content)"
+            out.append(msg)
+        elif role == "tool":
+            tid = tool_id_queue.pop(0) if tool_id_queue else ("call_orphan_%d" % counter[0])
+            content = m.get("content", "")
+            if not isinstance(content, str):
+                content = json.dumps(content, default=str)
+            pending_tool.append({"role": "tool", "tool_call_id": tid, "content": content})
+        else:  # user
+            txt = m.get("content", "")
+            if isinstance(txt, str) and txt.strip():
+                pending_user.append(txt)
+
+    flush()
+    return out
+
+
+def _normalize_openai_response(data):
+    """Shape an OpenAI chat-completions response like an Ollama response."""
+    choices = data.get("choices") or []
+    msg = (choices[0].get("message") if choices else {}) or {}
+    text = msg.get("content") or ""
+    tool_calls = []
+    for tc in (msg.get("tool_calls") or []):
+        fn = tc.get("function", {})
+        args = fn.get("arguments", "{}")
+        if isinstance(args, str):
+            try:
+                args = json.loads(args)
+            except Exception:
+                args = {"_raw": args}
+        tool_calls.append({"function": {"name": fn.get("name", ""), "arguments": args}})
+    out = {"role": "assistant", "content": text}
+    if tool_calls:
+        out["tool_calls"] = tool_calls
+    usage = data.get("usage") or {}
+    return {
+        "message": out,
+        "prompt_eval_count": usage.get("prompt_tokens"),
+        "eval_count": usage.get("completion_tokens"),
+        "stop_reason": (choices[0].get("finish_reason") if choices else None),
+    }
+
+
 def _normalize_anthropic_response(data):
     """Shape an Anthropic /messages response like an Ollama chat response so the
     rest of the loop (which reads data['message'], prompt_eval_count, etc.) is
@@ -359,6 +466,12 @@ def run_agent(
     model = os.environ.get("CTF_MODEL", model)
     if _CTF_PROVIDER == "anthropic":
         api_key = os.environ.get("ANTHROPIC_API_KEY", api_key)
+    elif _CTF_PROVIDER == "openai":
+        api_key = (
+            os.environ.get("CTF_API_KEY")
+            or os.environ.get("OPENAI_API_KEY")
+            or api_key
+        )
 
     run_id = str(uuid.uuid4())
     trace_path = LOG_DIR / f"{run_id}.jsonl"
@@ -1040,6 +1153,30 @@ REVERSE ENGINEERING TOOL GUIDANCE:
                     )
                     response.raise_for_status()
                     data = _normalize_anthropic_response(response.json())
+                elif _CTF_PROVIDER == "openai":
+                    _base = os.environ.get(
+                        "CTF_BASE_URL", "https://api.openai.com/v1"
+                    ).rstrip("/")
+                    _body = {
+                        "model": model,
+                        "messages": _history_to_openai(messages),
+                        "tools": _ollama_tools_to_openai(tools),
+                        "max_tokens": _CTF_MAX_OUTPUT_TOKENS,
+                        "temperature": _CTF_TEMPERATURE,
+                    }
+                    if os.environ.get("CTF_SEND_TOP_P") == "1":
+                        _body["top_p"] = _CTF_TOP_P
+                    response = requests.post(
+                        _base + "/chat/completions",
+                        headers={
+                            "Authorization": f"Bearer {api_key}",
+                            "Content-Type": "application/json",
+                        },
+                        json=_body,
+                        timeout=(5, min(120, max(1, remaining))),
+                    )
+                    response.raise_for_status()
+                    data = _normalize_openai_response(response.json())
                 else:
                     response = requests.post(
                         OLLAMA_URL,
@@ -1173,7 +1310,7 @@ REVERSE ENGINEERING TOOL GUIDANCE:
             response_text = (assistant_message.get("content") or "").strip()
             if not response_text and empty_model_responses < 3:
                 empty_model_responses += 1
-                is_refusal = (stop_reason == "refusal")
+                is_refusal = (stop_reason in ("refusal", "content_filter"))
                 if is_refusal:
                     recovery = (
                         "That turn was stopped as a refusal. Scope reminder: this "
