@@ -40,3 +40,13 @@ RUN chmod 0644 /opt/ctf-tools/*.py /opt/ctf-tools/*.txt
 # Match the existing course sandbox's non-root UID/GID; never leave the
 # solver running as root after installing packages.
 USER 10001:10001
+
+# Offline QR and barcode decoding for forensic challenges
+USER root
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        zbar-tools \
+    && rm -rf /var/lib/apt/lists/*
+
+USER ctfuser
