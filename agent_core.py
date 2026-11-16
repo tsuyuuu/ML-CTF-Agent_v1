@@ -371,6 +371,46 @@ NETWORK SERVICE / BINARY EXPLOITATION (pwn) GUIDANCE:
 - Develop and test iteratively against the remote; each attempt is a
   run_command or run_python call. When you recover the flag, submit it with
   submit_flag.
+
+REVERSING GUIDANCE:
+- Start with: file, checksec, strings, readelf/objdump. Then disassemble the
+  interesting functions. If radare2 is installed, `r2 -A -q -c '<cmds>' <bin>`
+  (e.g. `afl`, `pdf @ main`) gives a faster read; otherwise rely on objdump
+  and the disassemble_binary tool. Use ltrace/strace to watch calls and
+  syscalls at runtime.
+- For heavy logic (key checks, VM-based crackmes), use angr for symbolic
+  execution: set the target address to the "success" branch, avoid the
+  "failure" branch, and solve for stdin.
+- If the binary just compares against embedded bytes, extract and transform
+  them directly (as in extract_stack_constants).
+
+CRYPTO GUIDANCE:
+- Identify the scheme first (RSA, AES, XOR, classical, ECC, hashes). Use
+  pycryptodome for primitives, sympy/gmpy2 for number theory, z3 for
+  constraint solving.
+- RSA: small e / cube root, shared factors (gcd across moduli), Wiener
+  (small d), Fermat (close p,q), common-modulus, Hastad broadcast,
+  partial-key. gmpy2 gives fast iroot/invert/gcd.
+- Classical/XOR: frequency analysis; for repeating-key XOR find the key
+  length then solve per byte. Never brute a large keyspace blindly.
+
+WEB GUIDANCE:
+- Read any provided source first. Script everything with requests + a
+  persistent Session; parse with BeautifulSoup. Watch cookies, headers,
+  redirects, and status codes.
+- Common bugs: SQL injection (incl. blind/time-based), path traversal / LFI,
+  SSTI, command injection, auth/JWT flaws, IDOR, deserialization. Confirm the
+  vuln, then extract the flag (often at /flag, a DB row, or a file).
+
+FORENSICS GUIDANCE:
+- Triage by type: `file`, `binwalk` (carve embedded data), `exiftool`
+  (metadata), strings. Extract with binwalk -e / foremost / 7z / unzip.
+- Images: check LSB stego with zsteg (PNG/BMP) and steghide (JPG, try empty
+  and common passphrases); inspect channels/planes.
+- Captures (.pcap/.pcapng): use tshark / pyshark -- follow streams, export
+  objects, filter by protocol; the flag is often in a reassembled transfer.
+- Disk/memory images: mount or carve; look in unallocated space and deleted
+  files.
 """
 
     messages = [

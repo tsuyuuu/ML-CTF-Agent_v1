@@ -8,3 +8,10 @@ requests>=2.31,<3
 beautifulsoup4>=4.12,<5
 pillow>=10,<13
 numpy>=1.26,<3
+# pwn: ROP chain building and gadget search
+ROPgadget>=7.4
+ropper>=1.13
+# crypto: fast arbitrary-precision arithmetic (RSA, lattice, etc.)
+gmpy2>=2.1,<3
+# forensics: pcap parsing in Python (complements tshark)
+pyshark>=0.6

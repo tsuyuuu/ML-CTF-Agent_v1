@@ -6,8 +6,13 @@ FROM ${BASE_IMAGE}
 USER root
 ENV DEBIAN_FRONTEND=noninteractive
 
-# Start with a compact, cross-category toolkit. Ghidra, angr, SageMath and
-# Wireshark are deliberately deferred until the core tool contracts work.
+# Cross-category CTF toolkit. tshark is preseeded non-interactive so the build
+# does not hang on its setuid prompt.
+RUN echo "wireshark-common wireshark-common/install-setuid boolean false" \
+        | debconf-set-selections
+# Core utilities MUST be present. The extra tools are installed resiliently
+# (one per apt call) so a single unavailable package can never fail the whole
+# image build -- the build logs a WARN and moves on.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         binutils \
@@ -17,13 +22,30 @@ RUN apt-get update \
         gcc \
         make \
         curl \
+        git \
         python3-venv \
         libimage-exiftool-perl \
         unzip \
         p7zip-full \
         xxd \
         socat \
+    && for pkg in ltrace strace patchelf binwalk foremost steghide tshark ruby ruby-dev; do \
+         apt-get install -y --no-install-recommends "$pkg" \
+           || echo "WARN: apt package $pkg unavailable; skipping"; \
+       done \
     && rm -rf /var/lib/apt/lists/*
+
+# radare2 is NOT packaged for Debian bookworm, so build it from source.
+# Soft-fail: objdump/gdb + the disassemble_binary tool cover the essentials.
+RUN git clone --depth 1 https://github.com/radareorg/radare2 /tmp/radare2 \
+        && /tmp/radare2/sys/install.sh \
+        && rm -rf /tmp/radare2 \
+    || echo "WARN: radare2 source build failed; use objdump/gdb instead"
+
+# Ruby-based CTF tools: one_gadget (pwn one-shot gadgets) and zsteg (PNG/BMP
+# steganography). Separate layer so a gem failure is easy to isolate.
+RUN gem install --no-document one_gadget zsteg || \
+    echo "WARN: ruby gem install failed; one_gadget/zsteg unavailable"
 
 # Keep solver-side third-party packages separate from the controller's venv.
 COPY requirements.solver-tools.txt /opt/ctf-tools/requirements.solver-tools.txt
@@ -39,6 +61,14 @@ RUN python3 -m venv /opt/ctf-tools-venv \
 RUN /opt/ctf-tools-venv/bin/python -m pip install --no-cache-dir \
         --index-url https://download.pytorch.org/whl/cpu torch \
     && chmod -R a+rX /opt/ctf-tools-venv
+
+# angr: symbolic execution for hard reversing/crypto. Heavy (~hundreds of MB).
+# Isolated layer with a soft failure so the rest of the image still builds if
+# angr's wheels are unavailable for this platform. Drop this RUN to slim the
+# image if you don't need symbolic execution.
+RUN /opt/ctf-tools-venv/bin/python -m pip install --no-cache-dir angr \
+        && chmod -R a+rX /opt/ctf-tools-venv \
+    || echo "WARN: angr install failed; symbolic execution unavailable"
 
 ENV PATH="/opt/ctf-tools-venv/bin:${PATH}"
 COPY ctf_tool_audit.py /opt/ctf-tools/ctf_tool_audit.py

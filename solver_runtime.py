@@ -35,7 +35,7 @@ class DockerSolver:
         self.image = selected
         self.container_id = None
 
-    def start(self, challenge_dir=None, network=None):
+    def start(self, challenge_dir=None, network=None, allow_host=False):
         """Start a fresh, restricted solver container.
 
         network: trusted-controller-only. Default None keeps the container
@@ -43,6 +43,12 @@ class DockerSolver:
         ServiceLauncher may pass the name of a pre-created *internal* Docker
         network so the solver can reach ONLY the authorized target (no
         internet). This value is never derived from agent/tool input.
+
+        allow_host: competition-only escape hatch. When True, network may be
+        "host" (or "bridge"), giving the solver the host's network stack so it
+        can reach remote challenge targets over the host VPN. This removes
+        network isolation, so it must only be set by the competition runner,
+        never by the benchmarking harness.
         """
 
         # Prevent multiple containers from being started by the same instance.
@@ -53,6 +59,8 @@ class DockerSolver:
         # fail closed on anything that is not a plain Docker network name.
         if network is None:
             network_arg = "none"
+        elif allow_host and network in ("host", "bridge"):
+            network_arg = network
         elif isinstance(network, str) and re.fullmatch(
             r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", network
         ) and network != "host":

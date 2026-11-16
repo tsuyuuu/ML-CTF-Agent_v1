@@ -1,0 +1,15 @@
+{
+  "run_id": "f01a64b1-56d4-43a1-82d9-54aa0ed9ddac",
+  "name": "whataxor-smoke",
+  "category": "rev",
+  "target": null,
+  "network": "none",
+  "status": "verified",
+  "candidates": [
+    "csawctf{0ne_sheeP_1wo_sheWp_2hree_5heeks_____z___zzz_____zzzzzz____xor}"
+  ],
+  "tool_calls": 6,
+  "elapsed_s": 9.14,
+  "trace_file": "/workspaces/ml-ctf-agent_v1/logs/198a84a8-3fbc-4c2c-90e2-8aa0ab2f8e9f.jsonl",
+  "recorded_at": "2026-11-16T16:02:51.511764+00:00"
+}

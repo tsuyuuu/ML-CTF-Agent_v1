@@ -66,6 +66,19 @@ class SolverNetworkTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 s.start(network=bad)
 
+    def test_host_allowed_only_with_flag(self):
+        # Competition escape hatch: host/bridge permitted only when allow_host.
+        s = solver_runtime.DockerSolver(image="ctf-solver:dev")
+        s.start(network="host", allow_host=True)
+        self.assertEqual(net_flag(self.rec.last_cmd), "host")
+        s.container_id = None
+        s.start(network="bridge", allow_host=True)
+        self.assertEqual(net_flag(self.rec.last_cmd), "bridge")
+        # Without the flag, host is still rejected (benchmark path stays locked).
+        s.container_id = None
+        with self.assertRaises(ValueError):
+            s.start(network="host", allow_host=False)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
