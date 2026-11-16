@@ -1,0 +1,9 @@
+# Deliberately narrow version ranges for the initial image. After validating
+# the image, save an exact resolved lock for reproducibility.
+pwntools>=4.11,<5
+pycryptodome>=3.20,<4
+sympy>=1.12,<2
+z3-solver>=4.12,<5
+requests>=2.31,<3
+beautifulsoup4>=4.12,<5
+pillow>=10,<13

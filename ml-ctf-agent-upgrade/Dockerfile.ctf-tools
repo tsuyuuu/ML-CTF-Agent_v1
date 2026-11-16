@@ -1,0 +1,42 @@
+# Phase 1: Layer CTF-analysis utilities on the EXISTING restricted solver image.
+# Build the existing image first: docker build -f Dockerfile.solver -t ctf-solver:dev .
+ARG BASE_IMAGE=ctf-solver:dev
+FROM ${BASE_IMAGE}
+
+USER root
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Start with a compact, cross-category toolkit. Ghidra, angr, SageMath and
+# Wireshark are deliberately deferred until the core tool contracts work.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        binutils \
+        checksec \
+        file \
+        gdb \
+        gcc \
+        make \
+        curl \
+        python3-venv \
+        libimage-exiftool-perl \
+        unzip \
+        p7zip-full \
+        xxd \
+        socat \
+    && rm -rf /var/lib/apt/lists/*
+
+# Keep solver-side third-party packages separate from the controller's venv.
+COPY requirements.solver-tools.txt /opt/ctf-tools/requirements.solver-tools.txt
+RUN python3 -m venv /opt/ctf-tools-venv \
+    && /opt/ctf-tools-venv/bin/python -m pip install --no-cache-dir \
+       -r /opt/ctf-tools/requirements.solver-tools.txt \
+    && chmod -R a+rX /opt/ctf-tools-venv
+
+ENV PATH="/opt/ctf-tools-venv/bin:${PATH}"
+COPY ctf_tool_audit.py /opt/ctf-tools/ctf_tool_audit.py
+COPY test_ctf_tooling.py /opt/ctf-tools/test_ctf_tooling.py
+RUN chmod 0644 /opt/ctf-tools/*.py /opt/ctf-tools/*.txt
+
+# Match the existing course sandbox's non-root UID/GID; never leave the
+# solver running as root after installing packages.
+USER 10001:10001
