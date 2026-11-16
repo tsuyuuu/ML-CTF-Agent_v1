@@ -89,3 +89,108 @@ def disassemble_binary(solver, path, start_address, stop_address):
         "error": result.get("stderr", "")[:500],
     }
 
+
+def extract_stack_constants(solver, path, function_name="main"):
+    """
+    Extract immediate-byte assignments to rbp-relative stack
+    locations from an ELF function.
+
+    Return contiguous blocks in memory order, not the order
+    in which instructions appear.
+    """
+    import re
+
+    if not isinstance(path, str) or not path.startswith(
+        ("/challenge/", "/work/")
+    ):
+        return {"error": "Invalid contestant path"}
+
+    if (
+        not isinstance(function_name, str)
+        or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.$@]*", function_name)
+        or len(function_name) > 100
+    ):
+        return {"error": "Invalid function name"}
+
+    command = (
+        "objdump -d -M intel --no-show-raw-insn "
+        f"--disassemble={shlex.quote(function_name)} "
+        f"{shlex.quote(path)}"
+    )
+
+    result = solver.run_command(command, timeout_s=10)
+
+    if result.get("exit_code") != 0:
+        return {
+            "error": "Disassembly failed",
+            "details": result.get("stderr", "")[:300],
+        }
+
+    if result.get("truncated"):
+        return {"error": "Disassembly output truncated"}
+
+    output = result.get("stdout", "")
+
+    pattern = re.compile(
+        r"\bmov\s+BYTE PTR\s*\[rbp-0x([0-9a-f]+)\]"
+        r"\s*,\s*0x([0-9a-f]+)\b",
+        re.IGNORECASE,
+    )
+
+    values = {}
+    duplicates = []
+
+    for offset_hex, value_hex in pattern.findall(output):
+        offset = int(offset_hex, 16)
+        value = int(value_hex, 16)
+
+        if not (0 <= value <= 255):
+            continue
+
+        if offset in values:
+            duplicates.append(hex(offset))
+
+        values[offset] = value
+
+    if not values:
+        return {
+            "error": "No supported byte assignments found",
+            "function": function_name,
+        }
+
+    # Group adjacent stack addresses into contiguous blocks.
+    # Descending rbp-relative offsets correspond to ascending
+    # addresses within the stack buffer.
+    offsets = sorted(values, reverse=True)
+    blocks = []
+    current = []
+
+    def finish_block(items):
+        if not items:
+            return
+        blocks.append({
+            "first_offset": hex(items[0]),
+            "last_offset": hex(items[-1]),
+            "count": len(items),
+            "hex_bytes": bytes(values[x] for x in items).hex(),
+        })
+
+    for offset in offsets:
+        if current and current[-1] - offset != 1:
+            finish_block(current)
+            current = []
+        current.append(offset)
+
+    finish_block(current)
+
+    return {
+        "function": function_name,
+        "assignment_count": len(values),
+        "duplicate_offsets": duplicates,
+        "blocks": blocks,
+        "note": (
+            "Byte values are raw stored constants, not "
+            "necessarily plaintext. Determine any transformation "
+            "from the program logic."
+        ),
+    }
