@@ -1,5 +1,6 @@
 
 import json
+import re
 import time
 import uuid
 import requests
@@ -202,6 +203,8 @@ def run_agent(
     output_tokens = 0
     usage_missing = False
     empty_model_responses = 0
+    no_tool_recoveries = 0
+    failed_submissions = 0
 
     # --- P1 loop-discipline state ---
     discipline = _loop_discipline_config()
@@ -338,6 +341,36 @@ SERIALIZED MODEL / .pt / .pth FILE GUIDANCE:
 - numpy and a CPU build of torch are installed in the tool image. If an import
   still fails, do NOT retry it or attempt pip install (the solver has no
   network); parse the raw storage with struct instead.
+- A square 2D tensor of small integers is usually a GRID (a maze or image),
+  indexed spatially as grid[row][col] -- NOT a graph adjacency matrix. Do not
+  treat its rows as a node's neighbour list.
+- To solve a grid maze: find the (row,col) of the start and end cell values,
+  then BFS over passable cells using 4-directional moves. If the task says to
+  give the path "using AWSD/WASD", output the sequence of move letters
+  (up=W, down=S, left=A, right=D), not cell indices. The expected flag may be
+  that move string, or a hash of it -- follow the exact wording in the
+  challenge/hints. When you have a candidate, submit it with submit_flag.
+- BFS must only step on PASSABLE cells (value 0, plus the start/end cells);
+  it must never cross a wall (value 1). After finding a path, VERIFY every
+  step lands on a passable cell. A path whose length equals the Manhattan
+  distance between start and end is almost always invalid (it cuts through
+  walls) -- discard it and trust the longer, wall-avoiding path. Re-encode
+  that verified path in the exact letters the challenge names (WASD), and
+  submit both the raw string and its md5.
+
+NETWORK SERVICE / BINARY EXPLOITATION (pwn) GUIDANCE:
+- When a target service is given (host:port), interact with pwntools:
+  `from pwn import *; p = remote(host, port, timeout=10)`. Always set a
+  timeout. NEVER run a bare interactive `nc host port` with no piped input --
+  it blocks forever waiting on stdin and wastes the whole run. If you must use
+  the shell, pipe input: `printf '...' | nc -q1 host port`.
+- Typical flow: study the binary locally (checksec, disassembly, find the
+  vulnerable read/gets and the buffer size), determine the overflow offset,
+  build the payload, send it to the remote with pwntools, then read the
+  response and look for the flag. Use cyclic()/cyclic_find() to find offsets.
+- Develop and test iteratively against the remote; each attempt is a
+  run_command or run_python call. When you recover the flag, submit it with
+  submit_flag.
 """
 
     messages = [
@@ -799,6 +832,35 @@ REVERSE ENGINEERING TOOL GUIDANCE:
                 })
                 continue
 
+            # Non-empty text but NO tool call. The model often "answers" here
+            # by writing a candidate flag in prose instead of submitting it.
+            # Nudge it to act through a tool rather than ending the run.
+            if response_text and no_tool_recoveries < 2:
+                no_tool_recoveries += 1
+                looks_like_flag = bool(
+                    re.search(r"[A-Za-z0-9_]{2,}\{[^{}]{1,160}\}", response_text)
+                )
+                if looks_like_flag and "submit_flag" in tool_definitions:
+                    recovery = (
+                        "You wrote a candidate flag as text but did not submit "
+                        "it. Call submit_flag now with that exact value (the "
+                        "flag only). Do not reply in prose."
+                    )
+                else:
+                    recovery = (
+                        "You did not call any tool. If you have a candidate "
+                        "flag, submit it with submit_flag. Otherwise take the "
+                        "next concrete step, or call finish if no progress is "
+                        "possible. Respond only with a tool call."
+                    )
+                log_event({
+                    "type": "no_tool_recovery",
+                    "retry": no_tool_recoveries,
+                    "looks_like_flag": looks_like_flag,
+                })
+                messages.append({"role": "user", "content": recovery})
+                continue
+
             print("\nAgent response:", response_text)
             status = "no_tool_call"
             break
@@ -970,36 +1032,35 @@ REVERSE ENGINEERING TOOL GUIDANCE:
                 consecutive_recon = 0
             elif name in RECON_TOOLS:
                 consecutive_recon += 1
-
-            # Investigate -> validation transition nudge. Fires once each time
-            # a run of recon reaches the threshold; re-arms after any progress
-            # tool resets the counter.
-            if (
-                consecutive_recon == discipline["transition_at"]
-                and name not in NEVER_SKIP_TOOLS
-            ):
-                transition_notices += 1
-                hint = (
-                    "Stored constants were already extracted for this "
-                    "challenge (see the challenge analysis above). "
-                    if triage_constants else ""
-                )
-                messages.append({
-                    "role": "user",
-                    "content": (
-                        "TRANSITION: several investigation calls were made in "
-                        "a row without attempting a solution. " + hint +
-                        "Switch to solving now: use run_python to "
-                        "decode/transform the evidence, reconstruct a "
-                        "candidate, validate it against the binary, and submit "
-                        "it with submit_flag."
-                    ),
-                })
-                log_event({
-                    "type": "transition_nudge",
-                    "consecutive_recon": consecutive_recon,
-                    "triage_constants": triage_constants,
-                })
+                # Investigate -> validation transition nudge. Fires exactly
+                # once, when a recon run first reaches the threshold. Placing
+                # it inside the recon branch means neutral tools (run_command,
+                # used for exploits/interaction) never re-trigger it, and it
+                # re-arms only after a progress tool resets the counter.
+                if consecutive_recon == discipline["transition_at"]:
+                    transition_notices += 1
+                    hint = (
+                        "Stored constants were already extracted for this "
+                        "challenge (see the challenge analysis above). "
+                        if triage_constants else ""
+                    )
+                    messages.append({
+                        "role": "user",
+                        "content": (
+                            "TRANSITION: several investigation calls were made "
+                            "in a row without attempting a solution. " + hint +
+                            "Move toward an answer now: for a file, "
+                            "decode/transform the evidence with run_python; "
+                            "for a network service, develop and run an exploit "
+                            "(use pwntools). Reconstruct a candidate, validate "
+                            "it, and submit with submit_flag."
+                        ),
+                    })
+                    log_event({
+                        "type": "transition_nudge",
+                        "consecutive_recon": consecutive_recon,
+                        "triage_constants": triage_constants,
+                    })
 
             # Append to the persistent ledger so this result survives any later
             # compaction (kept in the always-preserved challenge message).
@@ -1022,6 +1083,33 @@ REVERSE ENGINEERING TOOL GUIDANCE:
             if name == "submit_flag" and result.get("verified"):
                 status = "verified"
                 break
+
+            # A rejected submission usually means the derivation is right but
+            # the *format* is wrong. Steer the model to enumerate the small
+            # format space instead of re-deriving inputs it already has.
+            if name == "submit_flag" and not result.get("verified"):
+                failed_submissions += 1
+                if failed_submissions <= 3:
+                    messages.append({
+                        "role": "user",
+                        "content": (
+                            "That candidate was rejected. The derivation may be "
+                            "correct but the FORMAT wrong. Do NOT re-derive data "
+                            "you already have (reuse your parsed grid/notes). "
+                            "Instead submit the remaining distinct formats, one "
+                            "per call: (a) both passable conventions (0=way vs "
+                            "its inverse); (b) the exact move letters W=up, "
+                            "A=left, S=down, D=right (and also try U/D/L/R); "
+                            "(c) the raw path string AND its md5 hex; (d) with "
+                            "and without a flag{...} wrapper. Submit each unique "
+                            "candidate exactly once; do not repeat one already "
+                            "tried."
+                        ),
+                    })
+                    log_event({
+                        "type": "failed_submission_nudge",
+                        "failed_submissions": failed_submissions,
+                    })
 
             if name == "finish":
                 status = "finished"

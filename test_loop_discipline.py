@@ -266,6 +266,52 @@ class LoopDisciplineTest(unittest.TestCase):
         self.assertIn("WORKING NOTES", content)
         self.assertIn("run_command", content)
 
+    # ---- Test 9: a prose flag triggers submit-recovery --------------------
+    def test_prose_flag_triggers_submit_recovery(self):
+        script = [
+            assistant(content="After analysis, the flag is FLAG{correct}"),
+            assistant(tool_call("submit_flag", flag="FLAG{correct}")),
+        ]
+        summary, disp, events = self._run(script)
+        self.assertEqual(disp.executions["submit_flag"], 1)
+        self.assertEqual(summary["status"], "verified")
+        self.assertGreaterEqual(self._types(events)["no_tool_recovery"], 1)
+
+    # ---- Test 10: no-tool recovery is bounded (no infinite loop) -----------
+    def test_no_tool_recovery_is_bounded(self):
+        script = [assistant(content="no tool call here") for _ in range(5)]
+        summary, disp, events = self._run(script, max_steps=10)
+        self.assertEqual(summary["status"], "no_tool_call")
+        self.assertLessEqual(self._types(events)["no_tool_recovery"], 2)
+
+    # ---- Test 11: rejected submission triggers the variant nudge ----------
+    def test_failed_submission_triggers_variant_nudge(self):
+        script = [
+            assistant(tool_call("submit_flag", flag="FLAG{wrong}")),
+            assistant(tool_call("submit_flag", flag="FLAG{correct}")),
+        ]
+        summary, disp, events = self._run(script)
+        self.assertGreaterEqual(
+            self._types(events)["failed_submission_nudge"], 1)
+        self.assertEqual(summary["status"], "verified")
+        self.assertEqual(disp.executions["submit_flag"], 2)
+
+    # ---- Test 12: transition nudge fires once, not once per later step ----
+    def test_transition_nudge_does_not_respam(self):
+        # 5 distinct recon calls reach the threshold, then many neutral
+        # run_commands. The nudge must fire exactly once, not on every step.
+        script = []
+        for i in range(5):
+            script.append(assistant(tool_call(
+                "disassemble_binary", path="/challenge/bin",
+                start_address=hex(0x1000 + i * 0x10),
+                stop_address=hex(0x1000 + i * 0x10 + 0x8))))
+        for i in range(6):
+            script.append(assistant(tool_call("run_command", command=f"echo {i}")))
+        script.append(assistant(tool_call("finish", reason="done")))
+        summary, disp, events = self._run(script, max_steps=20)
+        self.assertEqual(self._types(events)["transition_nudge"], 1)
+
     def test_repeat_limit_env_override(self):
         os.environ["CTF_REPEAT_LIMIT"] = "1"  # block on the 2nd identical call
         script = [assistant(tool_call("inspect_binary", path="/challenge/bin"))
