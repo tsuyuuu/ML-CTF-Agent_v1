@@ -122,7 +122,7 @@
     "type": "function",
     "function": {
       "name": "disassemble_binary",
-      "description": "Disassemble a bounded address range of a contestant binary. Use this for targeted reverse engineering instead of dumping an entire executable. Specify hexadecimal start and stop addresses, with a maximum range of 512 bytes.",
+      "description": "Disassemble a bounded address range of a contestant binary. Use this for targeted reverse engineering instead of dumping an entire executable. Specify hexadecimal start and stop addresses, with a maximum range of 8192 bytes (enough for a whole function).",
       "parameters": {
         "type": "object",
         "properties": {
@@ -147,7 +147,6 @@
       }
     }
   },
-
   {
     "type": "function",
     "function": {
@@ -165,11 +164,12 @@
             "description": "Function symbol name, such as main. Defaults to main."
           }
         },
-        "required": ["path"]
+        "required": [
+          "path"
+        ]
       }
     }
   },
-
   {
     "type": "function",
     "function": {

@@ -19,6 +19,7 @@ import re
 import subprocess
 import uuid
 from pathlib import Path
+_CTF_CMD_HARD_CAP = int(os.environ.get("CTF_CMD_HARD_CAP", "300"))
 
 class DockerSolver:
      # Manage the lifecycle and command execution of a restricted Docker container.
@@ -135,7 +136,7 @@ class DockerSolver:
         self.container_id = result.stdout.strip()
         return self.container_id
 
-    def run_command(self, command, timeout_s=10):
+    def run_command(self, command, timeout_s=60):
         """Execute a command inside the solver container."""
 
         if not self.container_id:
@@ -147,7 +148,9 @@ class DockerSolver:
         if len(command) > 4000:
             return {"error": "Command too long"}
 
-        limit = max(1, min(10, int(timeout_s)))
+        # Crypto/pwn/RE solver scripts need far more than 10s. Configurable.
+        hard_cap = int(os.environ.get("CTF_CMD_HARD_CAP", "300"))
+        limit = max(1, min(hard_cap, int(timeout_s)))
 
         try:
             # Execute the command inside the existing container.
@@ -178,19 +181,20 @@ class DockerSolver:
                 "timed_out": timed_out
             }
 
-            if timed_out:
-                self.stop()
-
+ 
+            # Do NOT destroy the container on timeout. The inner
+            # `timeout -k 2` already killed the process; keeping the
+            # container alive lets the agent retry with a smaller job.
             return output
 
         except subprocess.TimeoutExpired:
-            # Stop the container if the host-side subprocess
-            # exceeds its timeout, preventing continued execution.
-            self.stop()
+            # Host-side safety net. Leave the container up; the next
+            # `docker exec` starts a fresh process.
             return {
-                "error": "Command timeout; container terminated",
+                "error": "Command exceeded host-side limit",
                 "timed_out": True
             }
+
 
     def stop(self):
         """Destroy the solver container."""

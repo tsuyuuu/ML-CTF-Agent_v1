@@ -1,5 +1,6 @@
 
 import json
+import os
 import re
 import time
 import uuid
@@ -9,6 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import random
+_CTF_CMD_TIMEOUT = int(os.environ.get("CTF_CMD_TIMEOUT", "180"))
 
 
 OLLAMA_URL = "https://ollama.com/api/chat"
@@ -62,6 +64,36 @@ def _loop_discipline_config():
         # until the model attempts progress (run_python/write_file/submit).
         "recon_hard_cap": _int("CTF_RECON_HARD_CAP", 8, 3, 60),
     }
+
+
+# Read-only shell verbs. A run_command built only from these is investigation,
+# not progress -- so it must count toward the recon cap / transition nudge the
+# same way the named RECON_TOOLS do. Without this, forensics and pwn (which do
+# nearly everything through run_command) escape loop discipline entirely and
+# can burn the whole budget re-running strings/objdump/grep.
+_INSPECT_VERBS = frozenset({
+    "strings", "grep", "egrep", "zgrep", "cat", "head", "tail", "sed", "awk",
+    "file", "ls", "find", "nm", "objdump", "readelf", "otool", "llvm-objdump",
+    "llvm-nm", "lipo", "hexdump", "xxd", "od", "wc", "stat", "which", "tree",
+})
+# Markers that mean the command DOES something (writes, runs, fetches, extracts)
+# -- such a command is never classified as pure recon.
+_ACTION_MARKERS = (
+    ">", ">>", "tee ", "chmod", "./", "nc ", "ncat", "socat", "python",
+    "perl ", "ruby ", "tar -x", "tar x", "unzip ", "mkdir", "cp ", "mv ",
+    "git ", "wget", "curl", "make",
+)
+
+
+def _is_recon_command(cmd):
+    """True if a run_command is read-only investigation (strings/grep/cat/...)."""
+    if not isinstance(cmd, str) or not cmd.strip():
+        return False
+    low = cmd.lower()
+    if any(marker in low for marker in _ACTION_MARKERS):
+        return False
+    tokens = re.findall(r"[a-z0-9_\-\.]+", low)
+    return any(tok in _INSPECT_VERBS for tok in tokens)
 
 
 def _canonical_signature(name, args):
@@ -383,6 +415,17 @@ REVERSING GUIDANCE:
   "failure" branch, and solve for stdin.
 - If the binary just compares against embedded bytes, extract and transform
   them directly (as in extract_stack_constants).
+- Non-ELF targets: for Mach-O (macOS/iOS, incl. universal armv7/arm64) GNU
+  `objdump -Mintel` often yields nothing; use `llvm-objdump -d --macho` or
+  `llvm-nm`. Match the tool to the binary format (check `file` first) before
+  concluding there is no code to read.
+- Binaries may contain DECOY flags -- e.g. an array of taunt messages picked
+  at random on failure. The real flag is usually the one referenced on the
+  SUCCESS path (constructed/printed after the input check passes), not one
+  pulled from a fail-message array. If you find one or more plausible flag
+  strings and cannot fully invert the check within budget, SUBMIT the most
+  likely candidate(s) with submit_flag rather than giving up -- a submission
+  costs nothing and a correct guess wins.
 
 CRYPTO GUIDANCE:
 - Identify the scheme first (RSA, AES, XOR, classical, ECC, hashes). Use
@@ -411,6 +454,21 @@ FORENSICS GUIDANCE:
   objects, filter by protocol; the flag is often in a reassembled transfer.
 - Disk/memory images: mount or carve; look in unallocated space and deleted
   files.
+- PROVIDED LOGS/TEXT FIRST: if the challenge ships any log or text artifact
+  (console.log, *.log, *.txt, sysdiagnose, chat/DB dumps), grep ALL of it for
+  the flag format and for challenge-name keywords BEFORE sinking budget into a
+  binary: e.g. `grep -aiE 'flag\\{|<name>' file`. In mobile/iOS and app
+  forensics the flag is frequently PRINTED into a device log by the exact
+  component under analysis, not hidden in the binary. Read whole files, not
+  just the first 50 lines.
+- Mach-O / iOS artifacts (.dylib, universal binaries, .deb tweaks): GNU
+  objdump/nm/otool often return NOTHING on ARM/universal Mach-O. Use
+  `llvm-objdump -d --macho` / `llvm-nm`, or slice one arch with lipo first. Do
+  NOT loop `strings` on the same file -- run it once; if a string looks
+  obfuscated (short, high-entropy like `xq78`), try XOR/rotations in run_python.
+- After you extract an archive, DO NOT re-extract it. Note the output
+  directory and work from the files already on disk (see CONFIRMED PROGRESS /
+  WORKING NOTES above). Re-running extraction wastes the whole budget.
 """
 
     messages = [
@@ -606,6 +664,48 @@ REVERSE ENGINEERING TOOL GUIDANCE:
     # parsed grid) every time the context is compacted.
     challenge_base_content = messages[1]["content"]
     working_notes = []
+    durable_facts = []   # non-scrolling milestones (extractions, candidates)
+
+    def _short_args(args):
+        if isinstance(args, dict):
+            for key in ("command", "code", "path", "root"):
+                val = args.get(key)
+                if isinstance(val, str) and val.strip():
+                    return val.strip().replace("\n", " ")[:90]
+        return ""
+
+    def _maybe_durable(name, args, result):
+        """Record high-signal milestones that must survive compaction:
+        archive extractions (so the agent stops re-extracting) and any
+        flag-shaped string it ever saw (so a glimpsed candidate is never
+        lost). These are kept separately from the rolling notes window."""
+        if (
+            not isinstance(result, dict)
+            or result.get("error")
+            or result.get("skipped")
+        ):
+            return
+        cmd = _short_args(args)
+        low = cmd.lower()
+        if result.get("exit_code") in (0, None) and any(
+            k in low for k in (
+                "unzip", "tar ", "7z ", "lzma", "xz ", "zstd", "binwalk",
+                "foremost", "steghide", "extract", "ar x", "ar t", "lipo",
+            )
+        ):
+            fact = "extracted/opened: " + cmd
+            if fact not in durable_facts:
+                durable_facts.append(fact)
+        blob = ""
+        for key in ("stdout", "content", "disassembly"):
+            val = result.get(key)
+            if isinstance(val, str):
+                blob += val
+        match = re.search(r"[A-Za-z0-9_]{2,}\{[^{}\n]{1,120}\}", blob)
+        if match:
+            fact = "flag candidate seen: " + match.group(0)
+            if fact not in durable_facts:
+                durable_facts.append(fact)
 
     def _note_result(result):
         if not isinstance(result, dict):
@@ -627,15 +727,22 @@ REVERSE ENGINEERING TOOL GUIDANCE:
         )[:220]
 
     def _refresh_working_notes():
-        if not working_notes:
+        if not working_notes and not durable_facts:
             return
+        facts_block = ""
+        if durable_facts:
+            facts_block = (
+                "\n\nCONFIRMED PROGRESS (already done this run -- do NOT redo; "
+                "build on it):\n" + "\n".join(durable_facts[-12:])
+            )
         messages[1]["content"] = (
             challenge_base_content
-            + "\n\nWORKING NOTES (your most recent tool results, newest last). "
+            + facts_block
+            + "\n\nWORKING NOTES (your most recent tool calls, newest last). "
             "Build on these; do not repeat work already done. Persist data you "
             "will reuse (parsed grids, decoded values) to a file in /work, which "
             "survives compaction, and continue from where you left off:\n"
-            + "\n".join(working_notes[-20:])
+            + "\n".join(working_notes[-30:])
         )
 
     # autonomous agent loop
@@ -938,6 +1045,14 @@ REVERSE ENGINEERING TOOL GUIDANCE:
                     gate_args = {"_raw": gate_args}
             signature = _canonical_signature(name, gate_args)
 
+            gate_is_recon = (
+                name in RECON_TOOLS
+                or (
+                    name == "run_command"
+                    and _is_recon_command(_short_args(gate_args))
+                )
+            )
+
             skip_reason = None
             if name not in NEVER_SKIP_TOOLS:
                 prior = executed_signatures.get(signature, 0)
@@ -948,7 +1063,7 @@ REVERSE ENGINEERING TOOL GUIDANCE:
                         "result; repeating it yields no new information."
                     )
                 elif (
-                    name in RECON_TOOLS
+                    gate_is_recon
                     and consecutive_recon >= discipline["recon_hard_cap"]
                 ):
                     skip_reason = (
@@ -1031,7 +1146,7 @@ REVERSE ENGINEERING TOOL GUIDANCE:
                 result = execute_tool(
                     name,
                     args,
-                    timeout_s=min(10, remaining),
+                    timeout_s=min(_CTF_CMD_TIMEOUT, remaining),
                 )
 
                 if not isinstance(result, dict):
@@ -1070,7 +1185,7 @@ REVERSE ENGINEERING TOOL GUIDANCE:
             )
             if name in PROGRESS_TOOLS:
                 consecutive_recon = 0
-            elif name in RECON_TOOLS:
+            elif gate_is_recon:
                 consecutive_recon += 1
                 # Investigate -> validation transition nudge. Fires exactly
                 # once, when a recon run first reaches the threshold. Placing
@@ -1105,8 +1220,10 @@ REVERSE ENGINEERING TOOL GUIDANCE:
             # Append to the persistent ledger so this result survives any later
             # compaction (kept in the always-preserved challenge message).
             working_notes.append(
-                f"[{tool_calls}] {name}: {_note_result(result)}"
+                f"[{tool_calls}] {name}({_short_args(args)}): "
+                f"{_note_result(result)}"
             )
+            _maybe_durable(name, args, result)
             _refresh_working_notes()
             # ---------------------------------------------------------------
 
@@ -1117,8 +1234,19 @@ REVERSE ENGINEERING TOOL GUIDANCE:
                 break
 
             if result.get("timed_out"):
-                status = "timeout"
-                break
+                # Non-terminal: one slow command must not end the run.
+                messages.append({
+                    "role": "user",
+                    "content": (
+                        "SYSTEM DIRECTIVE: the last command hit its time "
+                        "limit and was killed (the container is still "
+                        "alive). Do NOT re-run it unchanged. Make it finish "
+                        "fast: shrink the search space, add an internal "
+                        "limit, process in chunks, or write progress to a "
+                        "file and inspect it. Then continue."
+                    ),
+                })
+                continue
 
             if name == "submit_flag" and result.get("verified"):
                 status = "verified"

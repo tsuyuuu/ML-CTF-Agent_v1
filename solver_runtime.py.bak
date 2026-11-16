@@ -1,0 +1,211 @@
+"""
+solver_runtime.py - Isolated Docker Solver Environment
+
+This module manages the Docker container used by our autonomous
+CTF agent to execute commands and analyze challenge files.
+
+The DockerSolver class is responsible for:
+1. Creating an isolated, unprivileged Docker container.
+2. Restricting network access, filesystem access, and system resources.
+3. Mounting authorized contestant files as read-only.
+4. Executing agent commands with enforced timeouts.
+5. Stopping and removing the container after execution.
+
+This separates the agent's command execution environment from the
+trusted controller, which manages challenge metadata and evaluation.
+"""
+import os
+import re
+import subprocess
+import uuid
+from pathlib import Path
+
+class DockerSolver:
+     # Manage the lifecycle and command execution of a restricted Docker container.
+    def __init__(self, image=None):
+        # Trusted-controller configuration; never accepted from agent tools.
+        selected = image if image is not None else os.environ.get(
+            "CTF_SOLVER_IMAGE", "ctf-solver:dev"
+        )
+        # Fail closed for malformed refs instead of passing them to Docker.
+        if not isinstance(selected, str) or not re.fullmatch(
+            r"[A-Za-z0-9][A-Za-z0-9._/:@-]{0,199}", selected
+        ):
+            raise ValueError("Invalid CTF solver image reference")
+        self.image = selected
+        self.container_id = None
+
+    def start(self, challenge_dir=None, network=None, allow_host=False):
+        """Start a fresh, restricted solver container.
+
+        network: trusted-controller-only. Default None keeps the container
+        fully offline (--network none). For service challenges, the trusted
+        ServiceLauncher may pass the name of a pre-created *internal* Docker
+        network so the solver can reach ONLY the authorized target (no
+        internet). This value is never derived from agent/tool input.
+
+        allow_host: competition-only escape hatch. When True, network may be
+        "host" (or "bridge"), giving the solver the host's network stack so it
+        can reach remote challenge targets over the host VPN. This removes
+        network isolation, so it must only be set by the competition runner,
+        never by the benchmarking harness.
+        """
+
+        # Prevent multiple containers from being started by the same instance.
+        if self.container_id is not None:
+            raise RuntimeError("Solver already running")
+
+        # Validate the network reference the same way as the image reference:
+        # fail closed on anything that is not a plain Docker network name.
+        if network is None:
+            network_arg = "none"
+        elif allow_host and network in ("host", "bridge"):
+            network_arg = network
+        elif isinstance(network, str) and re.fullmatch(
+            r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", network
+        ) and network != "host":
+            network_arg = network
+        else:
+            raise ValueError("Invalid solver network reference")
+
+        # Generate a unique container name to avoid naming conflicts.
+        name = f"ctf-{uuid.uuid4().hex[:12]}"
+
+        # Configure Docker isolation and resource restrictions.
+        cmd = [
+            "docker", "run", "-d", "--rm",
+            "--name", name,
+
+            # Networking: 'none' (default, fully offline) or a trusted
+            # internal network scoped to the single authorized target.
+            "--network", network_arg,
+
+            # Make the container's root filesystem read-only.
+            "--read-only",
+
+            # Remove Linux capabilities and prevent privilege escalation.
+            "--cap-drop", "ALL",
+            "--security-opt", "no-new-privileges",
+
+             # Limit process count, memory consumption, and CPU usage.
+            "--pids-limit", "64",
+            "--memory", "512m",
+            "--cpus", "1",
+
+            # Run commands as an unprivileged user rather than root.
+            "--user", "10001:10001",
+
+            # Set the default working directory for agent commands.
+            "--workdir", "/work",
+
+            # Provide a writable, executable temporary workspace.
+            # Restrict ownership to the unprivileged solver user.
+            "--tmpfs",
+            "/work:rw,exec,nosuid,nodev,uid=10001,gid=10001,mode=0700,size=64m",
+            
+            # Provide temporary storage for programs that require /tmp.
+            "--tmpfs",
+            "/tmp:rw,uid=10001,gid=10001,mode=1777,size=32m",
+        ]
+
+        # Mount authorized contestant files when a challenge is provided.
+        if challenge_dir is not None:
+            path = Path(challenge_dir).resolve()
+
+            # Validate that the challenge directory exists.
+            if not path.is_dir():
+                raise ValueError("Challenge directory not found")
+
+            # Mount challenge files read-only so the agent can inspect
+            # them without modifying the original contestant files.
+            cmd += [
+                "--mount",
+                f"type=bind,src={path},dst=/challenge,readonly"
+            ]
+
+        # Keep the container running so commands can be executed later.
+        cmd += [self.image, "sleep", "infinity"]
+
+        # Launch the container and capture its unique Docker ID.
+        result = subprocess.run(
+            cmd, capture_output=True, text=True,
+            timeout=30, check=True
+        )
+
+        self.container_id = result.stdout.strip()
+        return self.container_id
+
+    def run_command(self, command, timeout_s=60):
+        """Execute a command inside the solver container."""
+
+        if not self.container_id:
+            return {"error": "Solver not running"}
+
+        if not isinstance(command, str) or not command.strip():
+            return {"error": "Invalid command"}
+
+        if len(command) > 4000:
+            return {"error": "Command too long"}
+
+        # Crypto/pwn/RE solver scripts need far more than 10s. Configurable.
+        hard_cap = int(os.environ.get("CTF_CMD_HARD_CAP", "300"))
+        limit = max(1, min(hard_cap, int(timeout_s)))
+
+        try:
+            # Execute the command inside the existing container.
+            # The Linux timeout utility limits command execution time.
+            result = subprocess.run(
+                [
+                    "docker", "exec",
+                    "--workdir", "/work",
+                    self.container_id,
+                    "timeout", "-k", "2",
+                    f"{limit}s",
+                    "sh", "-c", command
+                ],
+                capture_output=True,
+                text=True,
+                timeout=limit + 4
+            )
+
+            # Exit code 124 indicates that the timeout utility
+            # terminated the command after exceeding its time limit.
+            timed_out = result.returncode == 124
+
+            output = {
+                "exit_code": result.returncode,
+                "stdout": result.stdout[:6000],
+                "stderr": result.stderr[:1000],
+                "truncated": len(result.stdout) > 6000,
+                "timed_out": timed_out
+            }
+
+ 
+            # Do NOT destroy the container on timeout. The inner
+            # `timeout -k 2` already killed the process; keeping the
+            # container alive lets the agent retry with a smaller job.
+            return output
+
+        except subprocess.TimeoutExpired:
+            # Host-side safety net. Leave the container up; the next
+            # `docker exec` starts a fresh process.
+            return {
+                "error": "Command exceeded host-side limit",
+                "timed_out": True
+            }
+
+
+    def stop(self):
+        """Destroy the solver container."""
+
+        # Clear the stored ID and force-remove the container.
+        if self.container_id:
+            container_id = self.container_id
+            self.container_id = None
+
+            subprocess.run(
+                ["docker", "rm", "-f", container_id],
+                capture_output=True,
+                timeout=15,
+                check=False
+            )

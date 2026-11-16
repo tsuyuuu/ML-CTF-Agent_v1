@@ -29,6 +29,8 @@ RUN apt-get update \
         p7zip-full \
         xxd \
         socat \
+        xz-utils zstd lz4 cabextract p7zip-full \
+        llvm \
     && for pkg in ltrace strace patchelf binwalk foremost steghide tshark ruby ruby-dev; do \
          apt-get install -y --no-install-recommends "$pkg" \
            || echo "WARN: apt package $pkg unavailable; skipping"; \

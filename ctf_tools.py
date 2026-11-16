@@ -30,7 +30,7 @@ def inspect_binary(solver, path):
     results = {}
 
     for name, command in commands.items():
-        result = solver.run_command(command, timeout_s=10)
+        result = solver.run_command(command, timeout_s=60)
         results[name] = {
             "output": result.get("stdout", "")[:2000],
             "error": result.get("stderr", "")[:300],
@@ -45,7 +45,9 @@ def disassemble_binary(solver, path, start_address, stop_address):
     Return bounded Intel-syntax disassembly from a binary.
 
     Addresses must be hexadecimal strings, e.g. 0x400f10.
-    The maximum allowed address range is 512 bytes.
+    The maximum allowed address range is 8192 bytes, enough to read a whole
+    function in one call (a 512-byte cap forced dozens of chunked calls on
+    larger functions, which wasted steps and tokens).
     """
     import re
 
@@ -66,8 +68,8 @@ def disassemble_binary(solver, path, start_address, stop_address):
     if start >= stop:
         return {"error": "Stop address must exceed start address"}
 
-    if stop - start > 512:
-        return {"error": "Address range exceeds 512 bytes"}
+    if stop - start > 8192:
+        return {"error": "Address range exceeds 8192 bytes"}
 
     quoted = shlex.quote(path)
 
@@ -78,13 +80,13 @@ def disassemble_binary(solver, path, start_address, stop_address):
         f"{quoted}"
     )
 
-    result = solver.run_command(command, timeout_s=10)
+    result = solver.run_command(command, timeout_s=60)
 
     output = result.get("stdout", "")
 
     return {
-        "disassembly": output[:5000],
-        "truncated": len(output) > 5000,
+        "disassembly": output[:24000],
+        "truncated": len(output) > 24000,
         "exit_code": result.get("exit_code"),
         "error": result.get("stderr", "")[:500],
     }
@@ -118,7 +120,7 @@ def extract_stack_constants(solver, path, function_name="main"):
         f"{shlex.quote(path)}"
     )
 
-    result = solver.run_command(command, timeout_s=10)
+    result = solver.run_command(command, timeout_s=60)
 
     if result.get("exit_code") != 0:
         return {
