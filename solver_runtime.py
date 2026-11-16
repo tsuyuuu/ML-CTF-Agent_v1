@@ -35,12 +35,30 @@ class DockerSolver:
         self.image = selected
         self.container_id = None
 
-    def start(self, challenge_dir=None):
-        """Start a fresh, restricted solver container."""
+    def start(self, challenge_dir=None, network=None):
+        """Start a fresh, restricted solver container.
+
+        network: trusted-controller-only. Default None keeps the container
+        fully offline (--network none). For service challenges, the trusted
+        ServiceLauncher may pass the name of a pre-created *internal* Docker
+        network so the solver can reach ONLY the authorized target (no
+        internet). This value is never derived from agent/tool input.
+        """
 
         # Prevent multiple containers from being started by the same instance.
         if self.container_id is not None:
             raise RuntimeError("Solver already running")
+
+        # Validate the network reference the same way as the image reference:
+        # fail closed on anything that is not a plain Docker network name.
+        if network is None:
+            network_arg = "none"
+        elif isinstance(network, str) and re.fullmatch(
+            r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", network
+        ) and network != "host":
+            network_arg = network
+        else:
+            raise ValueError("Invalid solver network reference")
 
         # Generate a unique container name to avoid naming conflicts.
         name = f"ctf-{uuid.uuid4().hex[:12]}"
@@ -49,10 +67,11 @@ class DockerSolver:
         cmd = [
             "docker", "run", "-d", "--rm",
             "--name", name,
-            
-            # Disable container networking to prevent external access.
-            "--network", "none",
-            
+
+            # Networking: 'none' (default, fully offline) or a trusted
+            # internal network scoped to the single authorized target.
+            "--network", network_arg,
+
             # Make the container's root filesystem read-only.
             "--read-only",
 
