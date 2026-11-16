@@ -14,6 +14,64 @@ OLLAMA_URL = "https://ollama.com/api/chat"
 LOG_DIR = Path(__file__).resolve().parent / "logs"
 
 
+# ---------------------------------------------------------------------------
+# P1 loop-discipline configuration.
+#
+# These govern repeated-action detection, budget-aware escalation, and the
+# investigate->validation transition. They are orchestration-only: they never
+# grant new tool powers, never touch solver isolation, the verifier, or the
+# Docker configuration. Defaults are intentionally generous so that clean
+# short solves (e.g. the verified rev-checker path) are never affected.
+# Overridable from the trusted-controller environment for A/B experiments.
+# ---------------------------------------------------------------------------
+
+# Tools that represent forward progress toward a solution. Using one of these
+# resets the "consecutive investigation" counter.
+PROGRESS_TOOLS = frozenset({"run_python", "write_file", "submit_flag"})
+
+# Read-only reconnaissance tools. Long unbroken runs of these, with no attempt
+# to decode/validate/submit, are the core rev-whataxor failure mode.
+RECON_TOOLS = frozenset({
+    "inspect_binary", "disassemble_binary", "analyze_artifact",
+    "extract_stack_constants", "list_files", "read_file",
+})
+
+# Tools that must never be short-circuited, so a real solve can always land.
+NEVER_SKIP_TOOLS = frozenset({"submit_flag", "finish"})
+
+
+def _loop_discipline_config():
+    """Read tunables from the environment with clamped, safe defaults."""
+    import os
+
+    def _int(name, default, lo, hi):
+        try:
+            value = int(os.environ.get(name, str(default)))
+        except (TypeError, ValueError):
+            return default
+        return max(lo, min(hi, value))
+
+    return {
+        # Short-circuit the Nth identical (tool, args) call. 2 => the 3rd
+        # identical call is blocked; the first two still execute.
+        "repeat_limit": _int("CTF_REPEAT_LIMIT", 2, 1, 10),
+        # After this many consecutive recon calls with no progress tool, nudge.
+        "transition_at": _int("CTF_TRANSITION_AT", 5, 2, 40),
+        # After this many consecutive recon calls, start blocking further recon
+        # until the model attempts progress (run_python/write_file/submit).
+        "recon_hard_cap": _int("CTF_RECON_HARD_CAP", 8, 3, 60),
+    }
+
+
+def _canonical_signature(name, args):
+    """Stable identity for a tool call, for exact-repeat detection."""
+    try:
+        payload = json.dumps(args, sort_keys=True, default=str)
+    except Exception:
+        payload = repr(args)
+    return name + "::" + payload
+
+
 
 def compact_messages(messages, max_evidence_chars=12000):
     """
@@ -141,6 +199,15 @@ def run_agent(
     output_tokens = 0
     usage_missing = False
     empty_model_responses = 0
+
+    # --- P1 loop-discipline state ---
+    discipline = _loop_discipline_config()
+    executed_signatures = {}       # canonical signature -> execution count
+    consecutive_recon = 0          # recon calls since last progress tool
+    short_circuits = 0             # redundant calls intercepted
+    triage_constants = False       # did automatic triage recover constants?
+    budget_notices = set()         # which budget thresholds were announced
+    transition_notices = 0         # how many transition nudges were injected
 
     tool_definitions = {
         t["function"]["name"]: t["function"]["parameters"]
@@ -419,6 +486,7 @@ REVERSE ENGINEERING TOOL GUIDANCE:
             )
 
             if observation.get("blocks"):
+                triage_constants = True
                 # Keep the evidence in the permanent challenge message, so
                 # proactive/HTTP-error compaction cannot accidentally drop it.
                 messages[1]["content"] += (
@@ -462,12 +530,58 @@ REVERSE ENGINEERING TOOL GUIDANCE:
                 ),
             })
 
+        # --- Budget-aware escalation ---------------------------------------
+        # Tell the model how much budget remains and, as it runs low, steer it
+        # from open-ended investigation toward validating and submitting a
+        # candidate. Injected AFTER compaction so it is present for this turn's
+        # model call. Each threshold is announced at most once.
+        steps_left = max_steps - tool_calls
+        half_at = max(1, (max_steps + 1) // 2)
+        validation_at = max(3, (max_steps + 3) // 4)
+
+        budget_directive = None
+        if steps_left <= 2 and "final" not in budget_notices:
+            budget_notices.add("final")
+            budget_directive = (
+                f"BUDGET NOTICE: only {steps_left} tool call(s) remain. "
+                "Take your final action now: submit your best candidate flag "
+                "with submit_flag, or call finish if you genuinely have no "
+                "candidate. Do not run further investigation."
+            )
+        elif steps_left <= validation_at and "validation" not in budget_notices:
+            budget_notices.add("validation")
+            budget_directive = (
+                f"BUDGET NOTICE: only {steps_left} of {max_steps} tool calls "
+                "remain. Stop broad investigation and move to validation. If "
+                "you have any candidate, reconstruct it, test it locally "
+                "(run_python or run_command against the binary), and submit it "
+                "with submit_flag. If stored constants were already extracted, "
+                "decode them now rather than re-disassembling."
+            )
+        elif steps_left <= half_at and "half" not in budget_notices:
+            budget_notices.add("half")
+            budget_directive = (
+                f"BUDGET NOTICE: about half the tool-call budget is used "
+                f"({steps_left} of {max_steps} remain). Prioritise actions "
+                "that move toward a candidate flag and avoid redundant "
+                "inspection of evidence you already have."
+            )
+
+        if budget_directive is not None:
+            messages.append({"role": "user", "content": budget_directive})
+            log_event({
+                "type": "budget_escalation",
+                "steps_left": steps_left,
+                "max_steps": max_steps,
+                "directive": budget_directive,
+            })
+
         remaining = max_seconds - (time.monotonic() - start)
 
         if remaining <= 0:
             status = "timeout"
             break
-        
+
         # request model action with retries
         data = None
 
@@ -648,6 +762,69 @@ REVERSE ENGINEERING TOOL GUIDANCE:
             action_start = time.monotonic()
             scope_violation = False
 
+            # --- P1 pre-execution gate: repeated-action / recon cap --------
+            # Compute a stable signature without mutating `args` (the main
+            # try-block re-parses and schema-validates it below).
+            gate_args = args
+            if isinstance(gate_args, str):
+                try:
+                    gate_args = json.loads(gate_args)
+                except Exception:
+                    gate_args = {"_raw": gate_args}
+            signature = _canonical_signature(name, gate_args)
+
+            skip_reason = None
+            if name not in NEVER_SKIP_TOOLS:
+                prior = executed_signatures.get(signature, 0)
+                if prior >= discipline["repeat_limit"]:
+                    skip_reason = (
+                        f"This exact call was already executed {prior} time(s) "
+                        "with identical arguments and returned the same "
+                        "result; repeating it yields no new information."
+                    )
+                elif (
+                    name in RECON_TOOLS
+                    and consecutive_recon >= discipline["recon_hard_cap"]
+                ):
+                    skip_reason = (
+                        f"{consecutive_recon} consecutive investigation calls "
+                        "were made without attempting a solution; further "
+                        "inspection is blocked until you act on existing "
+                        "evidence."
+                    )
+
+            if skip_reason is not None:
+                remaining_steps = max_steps - tool_calls - 1
+                skip_result = {
+                    "skipped": True,
+                    "reason": skip_reason,
+                    "steps_remaining": max(remaining_steps, 0),
+                    "directive": (
+                        "Do not repeat this action. Use the evidence already "
+                        "gathered: if constants or ciphertext were extracted, "
+                        "decode/transform them with run_python, validate the "
+                        "candidate against the binary, then call submit_flag. "
+                        "If genuinely stuck, call finish."
+                    ),
+                }
+                tool_calls += 1
+                short_circuits += 1
+                log_event({
+                    "type": "tool_skipped",
+                    "tool": name,
+                    "arguments": gate_args,
+                    "reason": skip_reason,
+                    "consecutive_recon": consecutive_recon,
+                })
+                messages.append({
+                    "role": "tool",
+                    "tool_name": name,
+                    "content": json.dumps(skip_result, default=str),
+                })
+                print(f"[{tool_calls}] {name}: SKIPPED ({skip_reason[:50]}...)")
+                continue
+            # ---------------------------------------------------------------
+
             try:
                 if isinstance(args, str):
                     args = json.loads(args)
@@ -722,6 +899,46 @@ REVERSE ENGINEERING TOOL GUIDANCE:
                 "content": json.dumps(result, default=str),
             })
 
+            # --- P1 post-execution bookkeeping -----------------------------
+            executed_signatures[signature] = (
+                executed_signatures.get(signature, 0) + 1
+            )
+            if name in PROGRESS_TOOLS:
+                consecutive_recon = 0
+            elif name in RECON_TOOLS:
+                consecutive_recon += 1
+
+            # Investigate -> validation transition nudge. Fires once each time
+            # a run of recon reaches the threshold; re-arms after any progress
+            # tool resets the counter.
+            if (
+                consecutive_recon == discipline["transition_at"]
+                and name not in NEVER_SKIP_TOOLS
+            ):
+                transition_notices += 1
+                hint = (
+                    "Stored constants were already extracted for this "
+                    "challenge (see the challenge analysis above). "
+                    if triage_constants else ""
+                )
+                messages.append({
+                    "role": "user",
+                    "content": (
+                        "TRANSITION: several investigation calls were made in "
+                        "a row without attempting a solution. " + hint +
+                        "Switch to solving now: use run_python to "
+                        "decode/transform the evidence, reconstruct a "
+                        "candidate, validate it against the binary, and submit "
+                        "it with submit_flag."
+                    ),
+                })
+                log_event({
+                    "type": "transition_nudge",
+                    "consecutive_recon": consecutive_recon,
+                    "triage_constants": triage_constants,
+                })
+            # ---------------------------------------------------------------
+
 
             # stopping conditions
             if scope_violation or result.get("scope_violation"):
@@ -761,6 +978,8 @@ REVERSE ENGINEERING TOOL GUIDANCE:
         "model_calls": model_calls,
         "model_attempts": model_attempts,
         "tool_calls": tool_calls,
+        "short_circuits": short_circuits,
+        "transition_nudges": transition_notices,
         "input_tokens": (
             None if usage_missing else input_tokens
         ),
