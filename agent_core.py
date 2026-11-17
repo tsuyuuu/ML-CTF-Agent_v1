@@ -473,6 +473,32 @@ def run_agent(
             or api_key
         )
 
+    # Active backend (mutable so we can auto-fall back mid-run on a refusal).
+    active_provider = _CTF_PROVIDER
+    active_model = model
+    active_key = api_key
+    active_base = os.environ.get("CTF_BASE_URL", "https://api.openai.com/v1").rstrip("/")
+
+    # Optional auto-fallback: if the primary model REFUSES (stop_reason
+    # refusal/content_filter), switch to a non-refusing model and finish the
+    # same run. Enabled by setting CTF_FALLBACK_MODEL. On the Duke gateway,
+    # primary and fallback share key+base, so only CTF_FALLBACK_MODEL is needed
+    # (e.g. a Gemini id). Off the gateway, set CTF_FALLBACK_PROVIDER/_API_KEY too.
+    fb_model = os.environ.get("CTF_FALLBACK_MODEL")
+    fb_provider = os.environ.get("CTF_FALLBACK_PROVIDER", active_provider).lower()
+    fb_base = os.environ.get("CTF_FALLBACK_BASE_URL", active_base).rstrip("/")
+    if fb_provider == "anthropic":
+        fb_key = (os.environ.get("CTF_FALLBACK_API_KEY")
+                  or os.environ.get("ANTHROPIC_API_KEY") or active_key)
+    elif fb_provider == "openai":
+        fb_key = (os.environ.get("CTF_FALLBACK_API_KEY")
+                  or os.environ.get("CTF_API_KEY")
+                  or os.environ.get("OPENAI_API_KEY") or active_key)
+    else:  # ollama
+        fb_key = (os.environ.get("CTF_FALLBACK_API_KEY")
+                  or os.environ.get("OLLAMA_API_KEY") or api_key)
+    fallback_used = False
+
     run_id = str(uuid.uuid4())
     trace_path = LOG_DIR / f"{run_id}.jsonl"
 
@@ -1127,10 +1153,10 @@ REVERSE ENGINEERING TOOL GUIDANCE:
             model_attempts += 1
 
             try:
-                if _CTF_PROVIDER == "anthropic":
+                if active_provider == "anthropic":
                     sys_text, amsgs = _history_to_anthropic(messages)
                     _body = {
-                        "model": model,
+                        "model": active_model,
                         "system": sys_text,
                         "messages": amsgs,
                         "tools": _ollama_tools_to_anthropic(tools),
@@ -1144,7 +1170,7 @@ REVERSE ENGINEERING TOOL GUIDANCE:
                     response = requests.post(
                         ANTHROPIC_URL,
                         headers={
-                            "x-api-key": api_key,
+                            "x-api-key": active_key,
                             "anthropic-version": ANTHROPIC_VERSION,
                             "content-type": "application/json",
                         },
@@ -1153,12 +1179,9 @@ REVERSE ENGINEERING TOOL GUIDANCE:
                     )
                     response.raise_for_status()
                     data = _normalize_anthropic_response(response.json())
-                elif _CTF_PROVIDER == "openai":
-                    _base = os.environ.get(
-                        "CTF_BASE_URL", "https://api.openai.com/v1"
-                    ).rstrip("/")
+                elif active_provider == "openai":
                     _body = {
-                        "model": model,
+                        "model": active_model,
                         "messages": _history_to_openai(messages),
                         "tools": _ollama_tools_to_openai(tools),
                         "max_tokens": _CTF_MAX_OUTPUT_TOKENS,
@@ -1167,9 +1190,9 @@ REVERSE ENGINEERING TOOL GUIDANCE:
                     if os.environ.get("CTF_SEND_TOP_P") == "1":
                         _body["top_p"] = _CTF_TOP_P
                     response = requests.post(
-                        _base + "/chat/completions",
+                        active_base + "/chat/completions",
                         headers={
-                            "Authorization": f"Bearer {api_key}",
+                            "Authorization": f"Bearer {active_key}",
                             "Content-Type": "application/json",
                         },
                         json=_body,
@@ -1181,11 +1204,11 @@ REVERSE ENGINEERING TOOL GUIDANCE:
                     response = requests.post(
                         OLLAMA_URL,
                         headers={
-                            "Authorization": f"Bearer {api_key}",
+                            "Authorization": f"Bearer {active_key}",
                             "Content-Type": "application/json",
                         },
                         json={
-                            "model": model,
+                            "model": active_model,
                             "messages": messages,
                             "tools": tools,
                             "stream": False,
@@ -1308,9 +1331,34 @@ REVERSE ENGINEERING TOOL GUIDANCE:
         # and retry. Generic empties get the ordinary nudge.
         if not calls:
             response_text = (assistant_message.get("content") or "").strip()
+            is_refusal = (stop_reason in ("refusal", "content_filter"))
+
+            # Auto-fallback: a refusal from the primary model on an authorized
+            # CTF task is a false positive. Switch once to the configured
+            # non-refusing model and continue the SAME run (the canonical history
+            # is provider-neutral, so the switch is seamless).
+            if not response_text and is_refusal and fb_model and not fallback_used:
+                fallback_used = True
+                active_provider, active_model = fb_provider, fb_model
+                active_key, active_base = fb_key, fb_base
+                empty_model_responses = 0
+                log_event({
+                    "type": "provider_fallback",
+                    "from_stop_reason": stop_reason,
+                    "to_provider": fb_provider,
+                    "to_model": fb_model,
+                })
+                messages.append({
+                    "role": "user",
+                    "content": (
+                        "Continue solving this challenge. Take the next concrete "
+                        "technical step and call a tool."
+                    ),
+                })
+                continue
+
             if not response_text and empty_model_responses < 3:
                 empty_model_responses += 1
-                is_refusal = (stop_reason in ("refusal", "content_filter"))
                 if is_refusal:
                     recovery = (
                         "That turn was stopped as a refusal. Scope reminder: this "
