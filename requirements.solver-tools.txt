@@ -15,3 +15,10 @@ ropper>=1.13
 gmpy2>=2.1,<3
 # forensics: pcap parsing in Python (complements tshark)
 pyshark>=0.6
+# forensics: QR / barcode decode (pairs with the zbar-tools CLI; needs libzbar0)
+pyzbar>=0.1.9
+# forensics: image processing / stego inspection (headless = no GUI deps)
+opencv-python-headless>=4.9,<5
+# forensics: PDF structure + text/image extraction
+pypdf>=4.0,<6
+pdfminer.six>=20221105

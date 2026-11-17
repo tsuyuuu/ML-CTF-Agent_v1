@@ -31,6 +31,7 @@ RUN apt-get update \
         socat \
         xz-utils zstd lz4 cabextract p7zip-full \
         llvm \
+        zbar-tools libzbar0 poppler-utils qpdf imagemagick sqlite3 \
     && for pkg in ltrace strace patchelf binwalk foremost steghide tshark ruby ruby-dev; do \
          apt-get install -y --no-install-recommends "$pkg" \
            || echo "WARN: apt package $pkg unavailable; skipping"; \
