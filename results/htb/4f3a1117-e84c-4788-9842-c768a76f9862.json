@@ -1,0 +1,14 @@
+{
+  "event_id": 3755,
+  "solved": 1,
+  "total_tokens": 794786,
+  "results": [
+    {
+      "id": 79390,
+      "name": "DNS Dossier",
+      "solved": true,
+      "tokens": 794786
+    }
+  ],
+  "recorded_at": "2026-11-17T21:25:44.242262+00:00"
+}

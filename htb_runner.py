@@ -21,6 +21,8 @@ best-guess and marked CONFIRM).
 import json
 import os
 import re
+import subprocess
+import sys
 import tarfile
 import tempfile
 import time
@@ -82,6 +84,10 @@ def target_from_status(st):
         return None
     host = field(st, "ip", "host", "ip_address", "hostname", "server")
     port = field(st, "port", "server_port")
+    if not port:                                  # HTB returns ports as a list
+        ports = field(st, "ports", "docker_ports")
+        if isinstance(ports, list) and ports:
+            port = ports[0]
     if host and port:
         return f"{host}:{port}"
     # Some servers return a ready-made connection string.
@@ -166,14 +172,18 @@ def get_target(client, challenge_id, wait=120):
     print(f"  [container] starting for challenge {challenge_id} ...")
     print("    start:", json.dumps(client.start_container(challenge_id))[:300])
     deadline = time.time() + wait
+    shown = False
     while time.time() < deadline:
         st = client.container_status(challenge_id)
+        if not shown:
+            print("    status:", json.dumps(st)[:400])   # confirm the shape once
+            shown = True
         tgt = target_from_status(st)
         if tgt:
             print(f"    target: {tgt}")
             return tgt
         time.sleep(5)
-    print("    (no target resolved; see container_status shape above)")
+    print("    (no target resolved; adjust target_from_status to the shape above)")
     return None
 
 
@@ -197,10 +207,17 @@ def solve_challenge(client, ch, tools, printed):
 
     print(f"\n==== [{category}] {name} (id={cid}) ====")
 
+    has_download = bool(field(ch, "filename", "hasDownload", "download"))
+
     with tempfile.TemporaryDirectory(prefix="htb_") as temp:
         workspace = Path(temp)
         workspace.chmod(0o755)
-        exported = download_and_stage(client, cid, workspace)
+        exported = []
+        if has_download:
+            try:
+                exported = download_and_stage(client, cid, workspace)
+            except Exception as e:
+                print(f"  [dl] download error (continuing without files): {e}")
         print(f"  files: {exported or '(none)'}")
 
         target = get_target(client, cid) if has_container else None
@@ -263,6 +280,20 @@ def solve_challenge(client, ch, tools, printed):
             + (result or {}).get("known_output_tokens", 0))
     print(f"  => {'SOLVED' if solved else 'not solved'} "
           f"({result.get('status') if result else 'error'}), ~{used} tokens")
+
+    # Per-challenge trace digest (the just-finished run is the newest log).
+    # Disable with CTF_DIGEST=0.
+    trace = (result or {}).get("trace_file")
+    if trace:
+        print(f"  trace: {trace}")
+    if os.environ.get("CTF_DIGEST", "1") != "0":
+        print("  --- trace digest ---")
+        try:
+            subprocess.run([sys.executable, str(BASE / "trace_digest.py")],
+                           check=False)
+        except Exception as e:
+            print(f"  [digest] {e}")
+
     return solved, used
 
 
