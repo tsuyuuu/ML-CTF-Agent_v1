@@ -604,6 +604,11 @@ SOLVING STRATEGY:
 - Interpret errors and adjust your next action.
 - Investigate actual program logic instead of guessing flags.
 - Submit candidate flags only through submit_flag.
+- FLAG FORMAT: a flag is a token wrapped like NAME{...}; the prefix varies by
+  event -- e.g. flag{...}, csawctf{...}, or HTB{...}. Submit the EXACT string you
+  recover, including its wrapper and case. If you recover the inner content but
+  are unsure of the wrapper, submit it wrapped as the event's format (HTB{...}
+  for Hack The Box events) and, if rejected, try the raw content.
 - Stop after successful verification.
 
 RESOURCE AWARENESS:
@@ -1163,6 +1168,17 @@ REVERSE ENGINEERING TOOL GUIDANCE:
                         "max_tokens": _CTF_MAX_OUTPUT_TOKENS,
                         "temperature": _CTF_TEMPERATURE,
                     }
+                    # Prompt caching: mark the big static prefix (system + tools)
+                    # cacheable so subsequent steps of the same challenge pay ~10%
+                    # for it instead of re-billing the full ~4k-token prompt every
+                    # call. Directly stretches a fixed token budget. Off with
+                    # CTF_PROMPT_CACHE=0.
+                    if os.environ.get("CTF_PROMPT_CACHE", "1") != "0":
+                        _body["system"] = [{
+                            "type": "text",
+                            "text": sys_text,
+                            "cache_control": {"type": "ephemeral"},
+                        }]
                     # top_p is deprecated on current Claude models (5.x); only
                     # send it if explicitly opted in for an older model.
                     if os.environ.get("CTF_SEND_TOP_P") == "1":
