@@ -119,6 +119,13 @@ def _history_to_anthropic(messages):
     return system_text, out
 
 
+def _is_claude_model(model):
+    """True for Claude model ids (so we only send Anthropic cache_control to
+    Claude, never to Gemini/GPT where a gateway might reject it)."""
+    m = (model or "").lower()
+    return any(k in m for k in ("claude", "sonnet", "opus", "haiku"))
+
+
 def _ollama_tools_to_openai(tools):
     """Ensure tools are in OpenAI's [{type:function, function:{...}}] shape."""
     out = []
@@ -1196,9 +1203,25 @@ REVERSE ENGINEERING TOOL GUIDANCE:
                     response.raise_for_status()
                     data = _normalize_anthropic_response(response.json())
                 elif active_provider == "openai":
+                    _msgs = _history_to_openai(messages)
+                    # Prompt caching through an OpenAI-compatible gateway
+                    # (LiteLLM) for Claude models: mark the system prompt
+                    # cacheable so each step of a challenge re-reads it at ~10%
+                    # instead of re-billing the full ~4k-token prompt. Only for
+                    # Claude ids (Gemini/GPT ignore or reject cache_control), and
+                    # off with CTF_PROMPT_CACHE=0.
+                    if (os.environ.get("CTF_PROMPT_CACHE", "1") != "0"
+                            and _is_claude_model(active_model)
+                            and _msgs and _msgs[0].get("role") == "system"
+                            and isinstance(_msgs[0].get("content"), str)):
+                        _msgs[0] = {"role": "system", "content": [{
+                            "type": "text",
+                            "text": _msgs[0]["content"],
+                            "cache_control": {"type": "ephemeral"},
+                        }]}
                     _body = {
                         "model": active_model,
-                        "messages": _history_to_openai(messages),
+                        "messages": _msgs,
                         "tools": _ollama_tools_to_openai(tools),
                         "max_tokens": _CTF_MAX_OUTPUT_TOKENS,
                         "temperature": _CTF_TEMPERATURE,
