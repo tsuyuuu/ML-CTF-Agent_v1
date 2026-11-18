@@ -11,8 +11,35 @@ import shlex
 import uuid
 
 SPECIALIST_TOOL_NAMES = frozenset({"list_files", "run_python", "analyze_artifact"})
-MAX_SCRIPT_BYTES = 2700
+# Raised from 2700. Large scripts are now STAGED IN CHUNKS (see _stage_bytes),
+# so they are no longer limited by the DockerSolver 4000-char command cap --
+# each chunk is its own sub-4000-char command. This ceiling just bounds a
+# single script.
+MAX_SCRIPT_BYTES = 262144
 MAX_ARTIFACT_BYTES = 200 * 1024 * 1024
+
+# Raw bytes per staging command. base64 of 2400 bytes = 3200 chars, leaving
+# plenty of headroom under the solver's 4000-char command limit.
+_CHUNK_RAW = 2400
+
+
+def _stage_bytes(solver, path, data, timeout_s=10, first_prefix=""):
+    """Write `data` (bytes) to `path` inside the solver by appending base64
+    chunks, each in its own command kept well under the 4000-char cap. Returns
+    the last solver reply dict (so callers can check exit_code/stderr)."""
+    quoted = shlex.quote(path)
+    if not data:
+        return solver.run_command(first_prefix + ": > " + quoted, timeout_s=timeout_s)
+    reply = None
+    for i in range(0, len(data), _CHUNK_RAW):
+        enc = base64.b64encode(data[i:i + _CHUNK_RAW]).decode("ascii")
+        redir = ">" if i == 0 else ">>"
+        prefix = first_prefix if i == 0 else ""
+        cmd = prefix + "printf '%s' '" + enc + "' | base64 -d " + redir + " " + quoted
+        reply = solver.run_command(cmd, timeout_s=timeout_s)
+        if not isinstance(reply, dict) or reply.get("exit_code") not in (0, None):
+            return reply
+    return reply
 
 
 def _result(reply, *, kind, **fields):
@@ -68,19 +95,22 @@ def execute_specialist_tool(name, args, solver, safe_path, timeout_s=10):
         data = code.encode("utf-8")
         if len(data) > MAX_SCRIPT_BYTES:
             raise ValueError(
-                f"Python code exceeds {MAX_SCRIPT_BYTES} UTF-8 bytes; "
-                "write a script using write_file and run it with run_command"
+                f"Python code exceeds {MAX_SCRIPT_BYTES} UTF-8 bytes"
             )
-        encoded = base64.b64encode(data).decode("ascii")
         filename = f"/work/ctf_{uuid.uuid4().hex}.py"
-        command = (
-            f"umask 077; printf '%s' '{encoded}' | base64 -d > "
-            f"{shlex.quote(filename)} && python3 -B {shlex.quote(filename)}"
+        # Stage the script in chunks (umask 077 on the first write), then run it
+        # as a short command. This avoids the 4000-char inline-command limit.
+        staged = _stage_bytes(
+            solver, filename, data, timeout_s=timeout_s, first_prefix="umask 077; "
         )
-        # DockerSolver.run_command caps command length at 4000 characters.
-        if len(command) > 4000:
-            raise ValueError("Encoded Python command exceeds runner limit")
-        reply = solver.run_command(command, timeout_s=timeout_s)
+        if not isinstance(staged, dict) or staged.get("exit_code") not in (0, None):
+            return _result(
+                staged if isinstance(staged, dict) else {"error": "failed to stage script"},
+                kind=name, script_path=filename,
+            )
+        reply = solver.run_command(
+            f"python3 -B {shlex.quote(filename)}", timeout_s=timeout_s
+        )
         return _result(reply, kind=name, script_path=filename)
 
     # analyze_artifact: read-only, bounded inspection of existing file.

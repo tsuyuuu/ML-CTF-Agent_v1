@@ -8,10 +8,22 @@ from ctf_tools import (
     disassemble_binary,
     extract_stack_constants,
 )
-from ctf_specialist_tools import SPECIALIST_TOOL_NAMES, execute_specialist_tool
+from ctf_specialist_tools import (
+    SPECIALIST_TOOL_NAMES,
+    execute_specialist_tool,
+    _stage_bytes,
+)
 
 
-# Switches between tools, choosing which ones should be called as necessary. 
+# Size limits (bytes). Raised from the original 2000/6000: those were far too
+# small -- read_file silently truncated any source file over 6 KB, and
+# write_file could not hold a real script. These ceilings still bound a single
+# tool result while letting the agent read whole files and write real scripts.
+_MAX_READ_BYTES = 131072    # 128 KiB -- read a whole source file / notebook
+_MAX_WRITE_BYTES = 262144   # 256 KiB -- hold a real script or data blob
+
+
+# Switches between tools, choosing which ones should be called as necessary.
 class ToolDispatcher:
     def __init__(self, solver, verifier=None):
         self.solver = solver
@@ -79,7 +91,7 @@ class ToolDispatcher:
                     }
 
                 return inspect_binary(self.solver, path)
-            
+
             elif name == "disassemble_binary":
                 path = self._safe_path(args["path"])
 
@@ -102,7 +114,7 @@ class ToolDispatcher:
                     args["start_address"],
                     args["stop_address"],
                 )
-            
+
             elif name == "extract_stack_constants":
                 path = self._safe_path(args["path"])
 
@@ -135,7 +147,7 @@ class ToolDispatcher:
                 path = self._safe_path(args["path"])
 
                 command = (
-                    "head -c 6001 -- "
+                    "head -c " + str(_MAX_READ_BYTES + 1) + " -- "
                     + shlex.quote(path)
                 )
 
@@ -146,8 +158,8 @@ class ToolDispatcher:
                 output = result.get("stdout", "")
 
                 return {
-                    "content": output[:6000],
-                    "truncated": len(output) > 6000,
+                    "content": output[:_MAX_READ_BYTES],
+                    "truncated": len(output) > _MAX_READ_BYTES,
                     "exit_code": result.get("exit_code"),
                     "error": result.get("stderr", "")
                 }
@@ -162,30 +174,24 @@ class ToolDispatcher:
                 if not isinstance(content, str):
                     return {"error": "Content must be text"}
 
-                if len(content.encode("utf-8")) > 2000:
+                data = content.encode("utf-8")
+                if len(data) > _MAX_WRITE_BYTES:
                     return {
-                        "error": "Content exceeds 2000 bytes"
+                        "error": "Content exceeds 256 KiB"
                     }
 
-                encoded = base64.b64encode(
-                    content.encode("utf-8")
-                ).decode("ascii")
-
-                command = (
-                    "printf %s "
-                    + shlex.quote(encoded)
-                    + " | base64 -d > "
-                    + shlex.quote(path)
-                )
-
-                result = self.solver.run_command(
-                    command, timeout_s=timeout_s
+                # Stage in chunks so large content is not blocked by the
+                # solver's 4000-char per-command limit.
+                result = _stage_bytes(
+                    self.solver, path, data, timeout_s=timeout_s
                 )
 
                 return {
-                    "written": result.get("exit_code") == 0,
+                    "written": isinstance(result, dict)
+                    and result.get("exit_code") == 0,
                     "path": path,
                     "error": result.get("stderr", "")
+                    if isinstance(result, dict) else "staging failed",
                 }
 
             elif name == "submit_flag":

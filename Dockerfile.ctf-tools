@@ -32,11 +32,19 @@ RUN apt-get update \
         xz-utils zstd lz4 cabextract p7zip-full \
         llvm \
         zbar-tools libzbar0 poppler-utils qpdf imagemagick sqlite3 \
-    && for pkg in ltrace strace patchelf binwalk foremost steghide tshark ruby ruby-dev; do \
+    && for pkg in ltrace strace patchelf binwalk foremost steghide tshark ruby ruby-dev \
+                  john hashcat pocl-opencl-icd ocl-icd-libopencl1 wordlists; do \
          apt-get install -y --no-install-recommends "$pkg" \
            || echo "WARN: apt package $pkg unavailable; skipping"; \
        done \
     && rm -rf /var/lib/apt/lists/*
+
+# Decompress the rockyou wordlist (the `wordlists` package ships it gzipped) so
+# crackers can point straight at /usr/share/wordlists/rockyou.txt. Soft-fail so
+# a missing wordlist never breaks the image.
+RUN gunzip -kf /usr/share/wordlists/rockyou.txt.gz 2>/dev/null \
+    && ls -la /usr/share/wordlists/rockyou.txt \
+    || echo "WARN: rockyou wordlist unavailable"
 
 # radare2 is NOT packaged for Debian bookworm, so build it from source.
 # Soft-fail: objdump/gdb + the disassemble_binary tool cover the essentials.
@@ -57,6 +65,12 @@ RUN python3 -m venv /opt/ctf-tools-venv \
        -r /opt/ctf-tools/requirements.solver-tools.txt \
     && chmod -R a+rX /opt/ctf-tools-venv
 
+# impacket: Kerberos / AD tooling (GetNPUsers, krb5 crypto helpers) for
+# forensics and AD challenges. Soft-fail so the rest of the image still builds.
+RUN /opt/ctf-tools-venv/bin/python -m pip install --no-cache-dir impacket \
+        && chmod -R a+rX /opt/ctf-tools-venv \
+    || echo "WARN: impacket install failed; Kerberos helpers unavailable"
+
 # PyTorch (CPU-only) for ML-themed challenges that ship serialized .pt models.
 # The solver runs with --network none, so nothing can be pip-installed at
 # attempt time; it must be baked in here. The CPU wheel avoids the large CUDA
@@ -73,7 +87,25 @@ RUN /opt/ctf-tools-venv/bin/python -m pip install --no-cache-dir angr \
         && chmod -R a+rX /opt/ctf-tools-venv \
     || echo "WARN: angr install failed; symbolic execution unavailable"
 
-ENV PATH="/opt/ctf-tools-venv/bin:${PATH}"
+# --- Crack-stack fix layer (appended so the heavy torch/angr layers stay cached) ---
+# 1) Debian installs `john` under /usr/sbin, off the non-root PATH -- symlink it
+#    onto PATH (reinstalling only if it is genuinely absent).
+# 2) Debian's `wordlists` package does NOT ship rockyou, so fetch it directly.
+RUN ( [ -x /usr/sbin/john ] || command -v john >/dev/null 2>&1 ) \
+      || ( apt-get update \
+           && apt-get install -y --no-install-recommends john ; \
+           rm -rf /var/lib/apt/lists/* ) ; \
+    ( [ -x /usr/sbin/john ] && ln -sf /usr/sbin/john /usr/local/bin/john ) || true ; \
+    mkdir -p /usr/share/wordlists ; \
+    curl -fsSL -o /usr/share/wordlists/rockyou.txt \
+      https://github.com/brannondorsey/naive-hashcat/releases/download/data/rockyou.txt \
+      || echo "WARN: rockyou download failed" ; \
+    echo "=== CRACK STACK STATUS ===" ; \
+    ( command -v john || ls -la /usr/sbin/john || echo "john MISSING" ) ; \
+    ( command -v hashcat || echo "hashcat MISSING" ) ; \
+    ( ls -la /usr/share/wordlists/rockyou.txt || echo "rockyou MISSING" )
+
+ENV PATH="/opt/ctf-tools-venv/bin:/usr/sbin:${PATH}"
 COPY ctf_tool_audit.py /opt/ctf-tools/ctf_tool_audit.py
 COPY test_ctf_tooling.py /opt/ctf-tools/test_ctf_tooling.py
 RUN chmod 0644 /opt/ctf-tools/*.py /opt/ctf-tools/*.txt
