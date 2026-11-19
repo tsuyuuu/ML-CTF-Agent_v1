@@ -1,0 +1,14 @@
+{
+  "event_id": 3755,
+  "solved": 0,
+  "total_tokens": 13021241,
+  "results": [
+    {
+      "id": 79474,
+      "name": "Hardware Managing System",
+      "solved": false,
+      "tokens": 13021241
+    }
+  ],
+  "recorded_at": "2026-11-18T23:38:50.262033+00:00"
+}
