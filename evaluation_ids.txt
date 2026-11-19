@@ -1,3 +1,0 @@
-rev-checker
-rev-baby-mult
-rev-whataxor
