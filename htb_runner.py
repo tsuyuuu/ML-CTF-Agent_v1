@@ -319,9 +319,20 @@ def main():
     solved_count, total_tokens = 0, 0
     printed = {"done": False}
     results = []
+    include_solved = os.environ.get("HTB_INCLUDE_SOLVED") == "1"
+    # HTB_ONLY: run just the challenge(s) whose name OR id contains this string
+    # (case-insensitive). e.g. HTB_ONLY="Hardware Managing"  or  HTB_ONLY=79474
+    only = os.environ.get("HTB_ONLY", "").strip().lower()
+    if only:
+        print(f"HTB_ONLY active: only challenges matching '{only}' (name or id)")
 
     for ch in challenges:
-        if field(ch, "solved", "isSolved", default=False):
+        if only:
+            name = str(field(ch, "name", "title", default="")).lower()
+            cid = str(field(ch, "id", "challenge_id", default="")).lower()
+            if only not in name and only not in cid:
+                continue
+        if field(ch, "solved", "isSolved", default=False) and not include_solved:
             continue
         if TOKEN_BUDGET and total_tokens >= TOKEN_BUDGET:
             print(f"\nToken budget reached ({total_tokens} >= {TOKEN_BUDGET}); stopping.")
